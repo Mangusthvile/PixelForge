@@ -326,3 +326,43 @@ test('imported files get clean names and strips become animations', async () => 
   assert.deepEqual(classifyImport(100, 24, anim), { type: 'sprite', frameWidth: 100, frameHeight: 24, frameCount: 1 });
   assert.equal(classifyImport(320, 64, { type: 'background', frameWidth: 320, frameHeight: 64 }).type, 'background');
 });
+
+test('Template Fill scale is computed from the known grid, not detected', async () => {
+  const { computeGridScale, formatScale } = await import('./pipeline.ts');
+  // 3x2 grid of 24px frames rendered 1536px wide -> 1536 / (3 * 24) = 21.33x
+  const scale = computeGridScale(1536, 3, 24);
+  assert.ok(Math.abs(scale - 21.3333) < 0.001);
+  assert.equal(formatScale(scale), '21.3');
+  // Exact 8x template
+  assert.equal(computeGridScale(576, 3, 24), 8);
+  assert.equal(formatScale(8), '8');
+  // Degenerate input falls back to 1x
+  assert.equal(computeGridScale(576, 0, 24), 1);
+});
+
+test('block-majority downscale ignores a half-pixel offset', async () => {
+  const { downscaleBlockModeData } = await import('./pipeline.ts');
+  // 4x scale, 2x1 target. Source 8x4: left block red, right block blue, but the red
+  // block bleeds 1px into the right block (simulated offset). Nearest sampling at the
+  // block center could pick either; majority keeps blue.
+  const w = 8, h = 4;
+  const src = new Uint8ClampedArray(w * h * 4);
+  for (let y = 0; y < h; y++) {
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      const red = x < 5; // 1px bleed past the 4px boundary
+      src[i] = red ? 255 : 0;
+      src[i + 1] = 0;
+      src[i + 2] = red ? 0 : 255;
+      src[i + 3] = 255;
+    }
+  }
+  const out = downscaleBlockModeData(src, w, h, 2, 1);
+  assert.deepEqual(Array.from(out.slice(0, 4)), [255, 0, 0, 255]);
+  assert.deepEqual(Array.from(out.slice(4, 8)), [0, 0, 255, 255]);
+
+  // Fully transparent pixels count as one color regardless of their RGB
+  const t = new Uint8ClampedArray(2 * 2 * 4);
+  t.set([10, 20, 30, 0, 99, 99, 99, 0, 1, 2, 3, 0, 255, 255, 255, 255]);
+  assert.deepEqual(Array.from(downscaleBlockModeData(t, 2, 2, 1, 1)), [0, 0, 0, 0]);
+});

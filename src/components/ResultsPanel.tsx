@@ -19,6 +19,10 @@ import {
   Maximize2,
   Edit3,
 } from 'lucide-react';
+import { formatScale } from '../utils/pipeline';
+
+type Zoom = 'fit' | 1 | 2 | 4 | 8;
+const ZOOM_OPTIONS: Zoom[] = ['fit', 1, 2, 4, 8];
 
 interface ResultsPanelProps {
   rawImage: string | null;
@@ -29,6 +33,7 @@ interface ResultsPanelProps {
   settings: CleanupSettings;
   onChangeSettings: (settings: CleanupSettings) => void;
   detectedScale: number;
+  computedScale?: number;
   frameWarning?: string;
   copyWarning?: string;
   onRetry?: () => void;
@@ -53,6 +58,7 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
   settings,
   onChangeSettings,
   detectedScale,
+  computedScale,
   frameWarning,
   copyWarning,
   onRetry,
@@ -67,7 +73,20 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
   onOpenPixelEditor,
   assetBar,
 }) => {
-  const [zoomLevel, setZoomLevel] = useState<number>(4); // 1x, 2x, 4x, 8x
+  // 'fit' scales the whole image to fit its panel (no scrolling); numbers are fixed zoom levels.
+  const [zoomLevel, setZoomLevel] = useState<Zoom>('fit');
+  const isFit = zoomLevel === 'fit';
+  const scaleLabel =
+    computedScale !== undefined
+      ? `Computed scale: ${formatScale(computedScale)}x`
+      : `Scale: ${settings.scaleOverride || detectedScale}x`;
+  const imageStyle = (): React.CSSProperties =>
+    isFit
+      ? { width: '100%', height: '100%', objectFit: 'contain', imageRendering: 'pixelated' }
+      : { transform: `scale(${zoomLevel})`, transformOrigin: 'center center', imageRendering: 'pixelated' };
+  const viewportClass = isFit
+    ? 'w-full h-[380px] overflow-hidden p-2 flex items-center justify-center rounded'
+    : 'overflow-auto max-h-[380px] p-2 flex items-center justify-center rounded';
   const [showSettingsDrawer, setShowSettingsDrawer] = useState(false);
 
   if (!rawImage && !cleanedImage) {
@@ -121,17 +140,18 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
         <div className="flex items-center gap-2">
           {/* Zoom Selector (1x, 2x, 4x, 8x) */}
           <div className="flex items-center bg-zinc-950 border border-zinc-800 rounded p-0.5 text-xs text-zinc-300">
-            {[1, 2, 4, 8].map((z) => (
+            {ZOOM_OPTIONS.map((z) => (
               <button
                 key={z}
                 onClick={() => setZoomLevel(z)}
+                title={z === 'fit' ? 'Fit the whole image in the panel' : `${z}x zoom`}
                 className={`px-2 py-0.5 rounded text-[11px] font-mono transition ${
                   zoomLevel === z
                     ? 'bg-amber-500/20 text-amber-400 font-semibold'
                     : 'text-zinc-400 hover:text-zinc-200'
                 }`}
               >
-                {z}x
+                {z === 'fit' ? 'Fit' : `${z}x`}
               </button>
             ))}
           </div>
@@ -249,24 +269,20 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
         {/* Canvas Display Area */}
         <div className="flex-1 overflow-auto p-4 flex items-center justify-center bg-[radial-gradient(#27272a_1px,transparent_1px)] [background-size:16px_16px]">
           {activeTab === 'compare' ? (
-            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 max-w-full items-start">
+            <div className={`grid grid-cols-1 md:grid-cols-2 gap-4 max-w-full items-start ${isFit ? 'w-full' : ''}`}>
               {/* Raw Result Card */}
               <div className="bg-zinc-900/90 border border-zinc-800 rounded-lg p-3 space-y-2 flex flex-col items-center">
                 <div className="flex items-center justify-between w-full text-[11px] font-medium text-zinc-400 pb-1 border-b border-zinc-800">
                   <span>Raw Model Output</span>
                   <span className="font-mono text-zinc-500 text-[10px]">Solid #FF00FF Magenta</span>
                 </div>
-                <div className="overflow-auto max-h-[380px] p-2 flex items-center justify-center bg-zinc-950 border border-zinc-800/80 rounded">
+                <div className={`${viewportClass} bg-zinc-950 border border-zinc-800/80`} data-testid="raw-viewport">
                   {rawImage && (
                     <img
                       src={rawImage}
                       alt="Raw Generated Output"
-                      style={{
-                        transform: `scale(${zoomLevel})`,
-                        transformOrigin: 'center center',
-                        imageRendering: 'pixelated',
-                      }}
-                      className="transition-transform duration-75 max-w-none"
+                      style={imageStyle()}
+                      className={isFit ? 'block' : 'transition-transform duration-75 max-w-none'}
                     />
                   )}
                 </div>
@@ -279,12 +295,13 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
                     <CheckCircle2 className="w-3.5 h-3.5 text-amber-400" />
                     <span>Cleaned & Palette-Locked</span>
                   </div>
-                  <span className="font-mono text-zinc-500 text-[10px]">
-                    Scale: {settings.scaleOverride || detectedScale}x • Transparent BG
+                  <span className="font-mono text-zinc-500 text-[10px]" data-testid="scale-label">
+                    {scaleLabel} • Transparent BG
                   </span>
                 </div>
                 <div
-                  className="overflow-auto max-h-[380px] p-2 flex items-center justify-center border border-zinc-800/80 rounded"
+                  className={`${viewportClass} border border-zinc-800/80`}
+                  data-testid="cleaned-viewport"
                   style={{
                     backgroundImage:
                       'linear-gradient(45deg, #18181b 25%, transparent 25%), linear-gradient(-45deg, #18181b 25%, transparent 25%), linear-gradient(45deg, transparent 75%, #18181b 75%), linear-gradient(-45deg, transparent 75%, #18181b 75%)',
@@ -297,12 +314,8 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
                     <img
                       src={cleanedImage}
                       alt="Cleaned Output"
-                      style={{
-                        transform: `scale(${zoomLevel})`,
-                        transformOrigin: 'center center',
-                        imageRendering: 'pixelated',
-                      }}
-                      className="transition-transform duration-75 max-w-none"
+                      style={imageStyle()}
+                      className={isFit ? 'block' : 'transition-transform duration-75 max-w-none'}
                     />
                   )}
                 </div>
@@ -379,8 +392,10 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
               </label>
 
               <div className="flex items-center justify-between text-xs text-zinc-400 pt-1">
-                <span>Detected Scale:</span>
-                <span className="font-mono text-amber-400 font-semibold">{detectedScale}x</span>
+                <span>{computedScale !== undefined ? 'Computed Scale (grid):' : 'Detected Scale:'}</span>
+                <span className="font-mono text-amber-400 font-semibold">
+                  {computedScale !== undefined ? formatScale(computedScale) : detectedScale}x
+                </span>
               </div>
 
               <div className="flex items-center justify-between gap-2 text-xs text-zinc-400">

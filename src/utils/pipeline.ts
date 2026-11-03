@@ -262,6 +262,87 @@ export function detectPixelScale(
   return Math.max(1, rounded);
 }
 
+// 6b. Computed scale for grid-based (Template Fill) results.
+// The grid layout is known, so the scale is exact rather than guessed:
+// raw image width / (grid columns x frame width). May be fractional (e.g. 21.3).
+export function computeGridScale(rawWidth: number, gridCols: number, frameWidth: number): number {
+  const expected = gridCols * frameWidth;
+  if (expected <= 0 || rawWidth <= 0) return 1;
+  return rawWidth / expected;
+}
+
+/** Round a scale for display: 21.333 -> 21.3, 8 -> 8. */
+export function formatScale(scale: number): string {
+  return String(Math.round(scale * 10) / 10);
+}
+
+/**
+ * Block-majority downscale: each destination pixel takes the most common color in its
+ * (possibly fractional) source block, instead of sampling a single point. A half-pixel
+ * offset in the model output therefore can't shift the figure by a whole pixel.
+ * All fully transparent pixels count as one color. Ties go to the color seen first in
+ * row-major order, so the result is deterministic.
+ */
+export function downscaleBlockModeData(
+  srcPixels: Uint8ClampedArray,
+  srcW: number,
+  srcH: number,
+  dstW: number,
+  dstH: number
+): Uint8ClampedArray {
+  const dstPixels = new Uint8ClampedArray(dstW * dstH * 4);
+  const scaleX = srcW / dstW;
+  const scaleY = srcH / dstH;
+  const counts = new Map<number, number>();
+
+  for (let y = 0; y < dstH; y++) {
+    const y0 = Math.min(srcH - 1, Math.floor(y * scaleY));
+    const y1 = Math.max(y0 + 1, Math.min(srcH, Math.floor((y + 1) * scaleY)));
+    for (let x = 0; x < dstW; x++) {
+      const x0 = Math.min(srcW - 1, Math.floor(x * scaleX));
+      const x1 = Math.max(x0 + 1, Math.min(srcW, Math.floor((x + 1) * scaleX)));
+
+      counts.clear();
+      let bestKey = 0;
+      let bestCount = 0;
+      let bestIdx = (y0 * srcW + x0) * 4;
+
+      for (let sy = y0; sy < y1; sy++) {
+        for (let sx = x0; sx < x1; sx++) {
+          const idx = (sy * srcW + sx) * 4;
+          const a = srcPixels[idx + 3];
+          const key =
+            a === 0
+              ? 0
+              : ((srcPixels[idx] << 24) | (srcPixels[idx + 1] << 16) | (srcPixels[idx + 2] << 8) | a) >>> 0;
+          const c = (counts.get(key) || 0) + 1;
+          counts.set(key, c);
+          if (c > bestCount) {
+            bestCount = c;
+            bestKey = key;
+            bestIdx = idx;
+          }
+        }
+      }
+
+      const dstIdx = (y * dstW + x) * 4;
+      if (bestKey === 0) {
+        dstPixels[dstIdx] = 0;
+        dstPixels[dstIdx + 1] = 0;
+        dstPixels[dstIdx + 2] = 0;
+        dstPixels[dstIdx + 3] = 0;
+      } else {
+        dstPixels[dstIdx] = srcPixels[bestIdx];
+        dstPixels[dstIdx + 1] = srcPixels[bestIdx + 1];
+        dstPixels[dstIdx + 2] = srcPixels[bestIdx + 2];
+        dstPixels[dstIdx + 3] = srcPixels[bestIdx + 3];
+      }
+    }
+  }
+
+  return dstPixels;
+}
+
 // 7. Frame Bounding Box
 export interface FrameBounds {
   minX: number;

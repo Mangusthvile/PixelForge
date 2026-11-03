@@ -4,6 +4,8 @@ import {
   removeStrayPixelsData,
   detectPixelScale,
   downscaleNearestNeighborData,
+  downscaleBlockModeData,
+  computeGridScale,
   getFrameBounds,
   getGridCellBounds,
   extractPaletteFromData,
@@ -17,6 +19,8 @@ export interface PipelineResult {
   cleanedDataUrl: string;
   detectedScale: number;
   actualScaleUsed: number;
+  /** Set for Template Fill results: exact scale from the known grid (may be fractional). */
+  computedScale?: number;
   frames: string[]; // data URLs
   frameWarning?: string;
   baselineY: number;
@@ -69,14 +73,14 @@ export async function runCleanupPipeline(
     targetH = config.frameHeight || 64;
   }
 
-  // 2. Detect scale
-  const detectedScale = detectPixelScale(
-    rawW,
-    rawH,
-    config.frameWidth,
-    config.frameHeight,
-    config.type === 'animation' ? cols : 1
-  );
+  // 2. Scale. Template Fill results are grid-based, so the scale is computed from the
+  // known layout; auto-detection is only used for assets that aren't grid-based.
+  const isTemplateGrid = config.type === 'animation' && config.animationMode === 'template';
+  const computedScale = isTemplateGrid ? computeGridScale(rawW, cols, config.frameWidth) : undefined;
+  const detectedScale =
+    computedScale !== undefined
+      ? Math.max(1, Math.round(computedScale))
+      : detectPixelScale(rawW, rawH, config.frameWidth, config.frameHeight, config.type === 'animation' ? cols : 1);
 
   const actualScale = settings.scaleOverride > 0 ? settings.scaleOverride : detectedScale;
 
@@ -98,7 +102,10 @@ export async function runCleanupPipeline(
 
   // Step B: Pixel snap downscale to target grid
   if (settings.pixelSnap && (curW > targetW || curH > targetH)) {
-    const downscaled = downscaleNearestNeighborData(curPixels, curW, curH, targetW, targetH);
+    // Grid results: majority color per scale x scale block (robust to half-pixel offsets).
+    const downscaled = isTemplateGrid
+      ? downscaleBlockModeData(curPixels, curW, curH, targetW, targetH)
+      : downscaleNearestNeighborData(curPixels, curW, curH, targetW, targetH);
     curPixels = downscaled;
     curW = targetW;
     curH = targetH;
@@ -249,6 +256,7 @@ export async function runCleanupPipeline(
       cleanedDataUrl: rowDataUrl,
       detectedScale,
       actualScaleUsed: actualScale,
+      computedScale,
       frames,
       frameWarning,
       baselineY,
@@ -271,6 +279,7 @@ export async function runCleanupPipeline(
     cleanedDataUrl,
     detectedScale,
     actualScaleUsed: actualScale,
+    computedScale,
     frames,
     frameWarning,
     baselineY,

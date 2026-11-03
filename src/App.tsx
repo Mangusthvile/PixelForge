@@ -104,6 +104,7 @@ export default function App() {
   const [cleanedImage, setCleanedImage] = useState<string | null>(null);
   const [frames, setFrames] = useState<string[]>([]);
   const [detectedScale, setDetectedScale] = useState<number>(1);
+  const [computedScale, setComputedScale] = useState<number | undefined>();
   const [frameWarning, setFrameWarning] = useState<string | undefined>();
   const [copyWarning, setCopyWarning] = useState<string | undefined>();
   const [baselineY, setBaselineY] = useState<number>(-1);
@@ -440,6 +441,7 @@ export default function App() {
         setCleanedImage(result.cleanedDataUrl);
         setFrames(result.frames);
         setDetectedScale(result.detectedScale);
+        setComputedScale(result.computedScale);
         setFrameWarning(result.frameWarning);
         setCopyWarning(result.copyWarning);
         setBaselineY(result.baselineY);
@@ -468,6 +470,7 @@ export default function App() {
     // Detach the previous asset so intermediate results never overwrite its library entry.
     setOpenItem(null);
     setSaveStatus('idle');
+    setComputedScale(undefined);
     setGenerationProgressText('Preparing style references & prompt...');
 
     try {
@@ -938,6 +941,7 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
     setParallaxLayers(item.metadata.parallaxLayers);
     setOpenItem(item);
     setSaveStatus('idle');
+    setComputedScale(undefined);
     setConfig((prev) => ({
       ...prev,
       type: item.type,
@@ -1227,6 +1231,7 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
               settings={settings}
               onChangeSettings={handleSettingsChange}
               detectedScale={detectedScale}
+              computedScale={computedScale}
               frameWarning={frameWarning}
               copyWarning={copyWarning}
               onRetry={() => handleGenerate()}
