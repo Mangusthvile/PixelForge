@@ -22,6 +22,7 @@ import {
   INITIAL_BACKGROUNDS_PROFILE,
 } from './utils/storage';
 import { runCleanupPipeline, GridCheck } from './utils/canvasPipeline';
+import { buildStripDataUrl } from './utils/strip';
 import { buildGenerationPrompt } from './utils/promptBuilder';
 import {
   buildGridTemplateImage,
@@ -249,6 +250,20 @@ export default function App() {
     setCurrentAssetName(finalItem.name);
   };
 
+  // Every frame edit (delete, reorder, duplicate, redo, touch-up) goes through here: the
+  // frames change and the sheet strip (cleanedImage) is rebuilt from them, so thumbnails,
+  // downloads and exports always match the frames. Stale rebuilds from older edits are dropped.
+  const stripBuildRef = useRef(0);
+  const applyFrameEdit = (newFrames: string[]) => {
+    setFrames(newFrames);
+    const build = ++stripBuildRef.current;
+    buildStripDataUrl(newFrames, config.frameWidth, config.frameHeight)
+      .then((strip) => {
+        if (build === stripBuildRef.current) setCleanedImage(strip);
+      })
+      .catch((err) => console.error('Failed to rebuild sheet strip:', err));
+  };
+
   // Auto-save: any change to the open asset (frames, cleaned sheet, name, fps) updates its library entry.
   useEffect(() => {
     if (!openItem || !cleanedImage) return;
@@ -343,6 +358,19 @@ export default function App() {
       try {
         const storedLib = await getStoredLibrary();
         updateLibrary(() => storedLib);
+        // One-time repair: older edits changed frames without rebuilding the sheet strip.
+        if (!localStorage.getItem(STRIP_REPAIR_FLAG)) {
+          const repaired = await repairAnimationStrips(storedLib);
+          for (const item of repaired) {
+            await saveLibraryItem(item);
+          }
+          if (repaired.length > 0) {
+            const byId = new Map(repaired.map((i) => [i.id, i]));
+            updateLibrary((prev) => prev.map((i) => byId.get(i.id) || i));
+            console.log(`[PixelForge] Rebuilt sheet strips for: ${repaired.map((i) => i.name).join(', ')}`);
+          }
+          localStorage.setItem(STRIP_REPAIR_FLAG, new Date().toISOString());
+        }
       } catch (err) {
         reportStorageError("Couldn't load the library", err);
       }
@@ -874,30 +902,7 @@ export default function App() {
     if (frameIndex !== undefined && frames[frameIndex]) {
       const newFrames = [...frames];
       newFrames[frameIndex] = editedDataUrl;
-      setFrames(newFrames);
-
-      // Composite back to cleanedImage canvas
-      const compCanvas = document.createElement('canvas');
-      compCanvas.width = config.frameWidth * newFrames.length;
-      compCanvas.height = config.frameHeight;
-      const ctx = compCanvas.getContext('2d')!;
-      ctx.imageSmoothingEnabled = false;
-
-      const imgsLoaded = newFrames.map((fSrc, idx) => {
-        return new Promise<void>((resolve) => {
-          const img = new Image();
-          img.onload = () => {
-            ctx.drawImage(img, idx * config.frameWidth, 0);
-            resolve();
-          };
-          img.src = fSrc;
-        });
-      });
-
-      Promise.all(imgsLoaded).then(() => {
-        const fullSheet = compCanvas.toDataURL('image/png');
-        setCleanedImage(fullSheet);
-      });
+      applyFrameEdit(newFrames);
     } else {
       setCleanedImage(editedDataUrl);
       setFrames([editedDataUrl]);
@@ -978,24 +983,7 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
         );
         const updatedFrames = [...frames];
         updatedFrames[frameIndex] = singleResult.cleanedDataUrl;
-        setFrames(updatedFrames);
-
-        // Reassemble full horizontal strip
-        const rowCanvas = document.createElement('canvas');
-        rowCanvas.width = config.frameWidth * updatedFrames.length;
-        rowCanvas.height = config.frameHeight;
-        const rowCtx = rowCanvas.getContext('2d')!;
-        rowCtx.imageSmoothingEnabled = false;
-
-        for (let i = 0; i < updatedFrames.length; i++) {
-          const imgElem = new Image();
-          await new Promise<void>((res) => {
-            imgElem.onload = () => res();
-            imgElem.src = updatedFrames[i];
-          });
-          rowCtx.drawImage(imgElem, i * config.frameWidth, 0);
-        }
-        setCleanedImage(rowCanvas.toDataURL('image/png'));
+        applyFrameEdit(updatedFrames);
       }
     } catch (e: any) {
       console.error('Frame regeneration failed:', e);
@@ -1324,7 +1312,7 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
                 frames={frames}
                 fps={fps}
                 onChangeFps={setFps}
-                onUpdateFrames={setFrames}
+                onUpdateFrames={applyFrameEdit}
                 onEditFrame={(idx) => {
                   setEditingFrameIndex(idx);
                   setPixelEditorOpen(true);
@@ -1570,4 +1558,27 @@ function normalizeConfig(cfg: GenerationConfig): GenerationConfig {
   const notes = named.poseNotes || [];
   if (notes.length === named.frameCount) return named;
   return { ...named, poseNotes: syncPoseNotes(notes, named.frameCount, named.description) };
+}
+
+const STRIP_REPAIR_FLAG = 'pixelforge_strip_repair_v1';
+
+/** Rebuild cleanedImage + frameCount from frames for every animation item. Returns the items it changed. */
+async function repairAnimationStrips(items: LibraryItem[]): Promise<LibraryItem[]> {
+  const changed: LibraryItem[] = [];
+  for (const item of items) {
+    if (item.type !== 'animation' || !item.frames || item.frames.length === 0) continue;
+    const { frameWidth, frameHeight } = item.metadata;
+    if (!frameWidth || !frameHeight) continue;
+    try {
+      const strip = await buildStripDataUrl(item.frames, frameWidth, frameHeight);
+      changed.push({
+        ...item,
+        cleanedImage: strip,
+        metadata: { ...item.metadata, frameCount: item.frames.length },
+      });
+    } catch (err) {
+      console.warn(`Could not rebuild the sheet for "${item.name}":`, err);
+    }
+  }
+  return changed;
 }

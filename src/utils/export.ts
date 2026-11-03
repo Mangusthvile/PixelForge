@@ -1,6 +1,7 @@
 import JSZip from 'jszip';
 import { LibraryItem } from '../types';
 import { createAnimatedGif } from './gifEncoder';
+import { manifestEntry } from './strip';
 
 // Helper to trigger file download
 export function downloadBlob(blob: Blob, filename: string): void {
@@ -109,21 +110,10 @@ export async function exportMultipleAssetsZip(items: LibraryItem[]): Promise<Blo
     const baseFilename = `${item.name}.png`;
     imgFolder.file(baseFilename, dataUrlToBlob(item.cleanedImage));
 
-    const entry: any = {
-      id: item.id,
-      file: `images/${baseFilename}`,
-      type: item.type,
-      frameWidth: item.metadata.frameWidth,
-      frameHeight: item.metadata.frameHeight,
-      frames: item.metadata.frameCount || (item.frames ? item.frames.length : 1),
-      fps: item.metadata.fps || 8,
-      baselineY: item.metadata.baselineY || 0,
-    };
+    // Frame count always comes from item.frames (see manifestEntry).
+    const entry: any = manifestEntry(item);
 
     if (item.type === 'background') {
-      entry.width = item.metadata.frameWidth;
-      entry.height = item.metadata.frameHeight;
-      entry.tiling = item.metadata.tiling ?? true;
       if (item.metadata.parallaxLayers && item.metadata.parallaxLayers.length > 0) {
         entry.layers = item.metadata.parallaxLayers.map((l, idx) => {
           const layerFile = `images/${item.name}_layer_${idx}_${l.name}.png`;

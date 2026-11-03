@@ -520,3 +520,46 @@ test('grid detection finds the drawn layout from magenta gutters', async () => {
   assert.equal(rects[3].x + rects[3].w, 72);
   assert.equal(rects[11].y + rects[11].h, 48);
 });
+
+test('deleting a frame rebuilds a 4-frame strip and the manifest says 4', async () => {
+  const { composeStripPixels, manifestEntry, itemFrameCount } = await import('./strip.ts');
+  const fw = 24;
+  const fh = 24;
+  // 5 frames, each filled with its own red value so order can be checked
+  const framePixels = [10, 20, 30, 40, 50].map((v) => {
+    const px = new Uint8ClampedArray(fw * fh * 4);
+    for (let i = 0; i < px.length; i += 4) {
+      px[i] = v;
+      px[i + 3] = 255;
+    }
+    return px;
+  });
+  const frameUrls = framePixels.map((_, i) => `frame${i}`);
+
+  // Delete frame 3 (index 2), the same way the Animation Player does
+  const keptPixels = framePixels.filter((_, i) => i !== 2);
+  const keptUrls = frameUrls.filter((_, i) => i !== 2);
+
+  const strip = composeStripPixels(keptPixels, fw, fh);
+  assert.equal(strip.width, 4 * fw);
+  assert.equal(strip.height, fh);
+  const redAt = (frame: number) => strip.pixels[(5 * strip.width + frame * fw + 5) * 4];
+  assert.deepEqual([0, 1, 2, 3].map(redAt), [10, 20, 40, 50]);
+
+  // Manifest frame count comes from item.frames, even if the stored frameCount is stale
+  const item: any = {
+    id: 'item_x',
+    name: 'fig_chop',
+    type: 'animation',
+    frames: keptUrls,
+    cleanedImage: 'strip',
+    metadata: { frameWidth: fw, frameHeight: fh, frameCount: 5, fps: 8, baselineY: 22 },
+  };
+  assert.equal(itemFrameCount(item), 4);
+  assert.equal(manifestEntry(item).frames, 4);
+  assert.equal(manifestEntry(item).file, 'images/fig_chop.png');
+
+  // Transparent background where a frame is smaller than the cell
+  const small = composeStripPixels([new Uint8ClampedArray(4 * 4 * 4).fill(255)], 4, 8);
+  assert.equal(small.pixels[(7 * 4 + 0) * 4 + 3], 0);
+});
