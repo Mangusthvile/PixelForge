@@ -27,12 +27,17 @@ export const AssetNameBar: React.FC<AssetNameBarProps> = ({
   canSave,
 }) => {
   const [draft, setDraft] = useState(name);
+  // Only text the user typed is ever committed, so a stale draft can't rename a new asset.
+  const [dirty, setDirty] = useState(false);
 
   useEffect(() => {
     setDraft(name);
+    setDirty(false);
   }, [name]);
 
   const commit = () => {
+    if (!dirty) return;
+    setDirty(false);
     const cleaned = draft
       .trim()
       .replace(/\s+/g, '_')
@@ -55,12 +60,16 @@ export const AssetNameBar: React.FC<AssetNameBarProps> = ({
         data-testid="asset-rename-input"
         type="text"
         value={draft}
-        onChange={(e) => setDraft(e.target.value)}
+        onChange={(e) => {
+          setDraft(e.target.value);
+          setDirty(true);
+        }}
         onBlur={commit}
         onKeyDown={(e) => {
           if (e.key === 'Enter') (e.target as HTMLInputElement).blur();
           if (e.key === 'Escape') {
             setDraft(name);
+            setDirty(false);
             (e.target as HTMLInputElement).blur();
           }
         }}

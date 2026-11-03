@@ -39,12 +39,16 @@ import { PixelEditorModal } from './components/PixelEditorModal';
 import { LibraryDrawer } from './components/LibraryDrawer';
 import { AssetNameBar, SaveStatus } from './components/AssetNameBar';
 import {
-  resolveAssetName,
+  withAutoName,
+  generationAssetName,
   nextVersionName,
   sameFrames,
   importedAssetName,
-  classifyImport,
+  guessImportLayout,
+  sliceRects,
+  ImportLayout,
 } from './utils/naming';
+import { ImportDialog, ImportRequest } from './components/ImportDialog';
 import { exportMultipleAssetsZip, downloadBlob } from './utils/export';
 import { AlertCircle, Sparkles, Palette, X } from 'lucide-react';
 
@@ -66,7 +70,8 @@ export default function App() {
 
     const defaultAction = 'walk cycle continuous 6 frames swinging arms and stepping legs';
 
-    return {
+    return withAutoName({
+      assetName: '',
       type: 'animation',
       description: defaultAction,
       facing: 'right',
@@ -82,8 +87,12 @@ export default function App() {
       animationMode: 'template', // Default to Template Fill Mode
       selectedModel: savedModel,
       poseNotes: generatePoseNotes(defaultAction, 6),
-    };
+    });
   });
+
+  // Every config change goes through withAutoName so the Name field follows presets /
+  // suggestions until the user types their own name.
+  const changeConfig = (next: GenerationConfig) => setConfig(withAutoName(next));
 
   // Cleanup Settings
   const [settings, setSettings] = useState<CleanupSettings>({
@@ -139,6 +148,22 @@ export default function App() {
     versionName: string;
     resolve: (choice: NameConflictChoice) => void;
   } | null>(null);
+
+  const [importRequest, setImportRequest] = useState<{
+    request: ImportRequest;
+    resolve: (layout: ImportLayout | null) => void;
+  } | null>(null);
+
+  const askImportLayout = (request: ImportRequest) =>
+    new Promise<ImportLayout | null>((resolve) => {
+      setImportRequest({
+        request,
+        resolve: (layout) => {
+          setImportRequest(null);
+          resolve(layout);
+        },
+      });
+    });
 
   const isOpenItemInLibrary = Boolean(openItem && library.some((i) => i.id === openItem.id));
 
@@ -343,7 +368,7 @@ export default function App() {
   const handleSelectProfile = (p: StyleProfile) => {
     setActiveProfile(p);
     if (p.name.toLowerCase().includes('background')) {
-      setConfig((prev) => ({
+      setConfig((prev) => withAutoName({
         ...prev,
         type: 'background',
         description: 'dense alpine evergreen pines, misty blue distant peaks',
@@ -354,7 +379,7 @@ export default function App() {
       }));
     } else {
       const actionDesc = 'walk cycle continuous 6 frames swinging arms and stepping legs';
-      setConfig((prev) => ({
+      setConfig((prev) => withAutoName({
         ...prev,
         type: 'animation',
         description: actionDesc,
@@ -464,6 +489,9 @@ export default function App() {
   // MAIN GENERATION FLOW
   const handleGenerate = async (overrideConfig?: Partial<GenerationConfig>) => {
     const currentConfig = { ...config, ...(overrideConfig || {}) };
+    // The new asset's name comes only from the config's Name field, never from the open asset.
+    const newAssetName = generationAssetName(currentConfig);
+    setCurrentAssetName(newAssetName);
     setIsGenerating(true);
     setError(null);
     setCopyWarning(undefined);
@@ -600,13 +628,11 @@ export default function App() {
         setRawImage(assembledUrl);
         setCleanedImage(assembledUrl);
         setFrames(accumulatedFrames);
-        const fbfName = resolveAssetName(currentConfig, `fig_${sanitizeName(currentConfig.description)}`);
-        setCurrentAssetName(fbfName);
 
         // Save to library
         const newItem: LibraryItem = {
           id: `item_${Date.now()}`,
-          name: fbfName,
+          name: newAssetName,
           type: currentConfig.type,
           profileId: targetProfile.id,
           profileName: targetProfile.name,
@@ -653,8 +679,6 @@ export default function App() {
 
       // 2. Build Prompt
       const builtPrompt = buildGenerationPrompt(currentConfig, enrichedProfile);
-      const assetName = resolveAssetName(currentConfig, builtPrompt.assetName);
-      setCurrentAssetName(assetName);
 
       // 3. Call Server API
       const response = await fetch('/api/generate', {
@@ -700,7 +724,7 @@ export default function App() {
 
         const newItem: LibraryItem = {
           id: `item_${Date.now()}`,
-          name: assetName,
+          name: newAssetName,
           type: currentConfig.type,
           profileId: targetProfile.id,
           profileName: targetProfile.name,
@@ -942,7 +966,7 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
     setOpenItem(item);
     setSaveStatus('idle');
     setComputedScale(undefined);
-    setConfig((prev) => ({
+    setConfig((prev) => withAutoName({
       ...prev,
       type: item.type,
       frameWidth: item.metadata.frameWidth,
@@ -980,18 +1004,45 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
     await persistItem({ ...item, name: newName });
   };
 
-  // Import image files from disk into the library
+  // Import image files from disk into the library. Each file gets a dialog for
+  // type / frame size / frame count; multi-frame imports are sliced and stored like
+  // generated animations (one frame per cell plus a horizontal strip).
   const handleImportFiles = async (files: File[]) => {
     let lastImported: LibraryItem | null = null;
-    for (const file of files) {
+    for (let n = 0; n < files.length; n++) {
+      const file = files[n];
       try {
         const dataUrl = await readFileAsDataUrl(file);
         const img = await loadImage(dataUrl);
-        const layout = classifyImport(img.naturalWidth, img.naturalHeight, config);
-        const frames =
-          layout.frameCount > 1
-            ? sliceStrip(img, layout.frameWidth, layout.frameHeight, layout.frameCount)
-            : [dataUrl];
+        const width = img.naturalWidth;
+        const height = img.naturalHeight;
+        const gif = file.type === 'image/gif' || /\.gif$/i.test(file.name) ? await decodeGifFrames(dataUrl) : null;
+        const gifFrameCount = gif?.frames.length || 1;
+
+        const layout = await askImportLayout({
+          fileName: file.name,
+          preview: dataUrl,
+          width,
+          height,
+          gifFrameCount,
+          initial: guessImportLayout(width, height, config, gifFrameCount),
+          index: n + 1,
+          total: files.length,
+        });
+        if (!layout) continue;
+
+        const { frameWidth: fw, frameHeight: fh } = layout;
+        let frames: string[];
+        if (gif && gifFrameCount > 1 && fw === width && fh === height) {
+          frames = gif.frames.slice(0, layout.frameCount);
+        } else if (layout.frameCount === 1 && fw === width && fh === height) {
+          frames = [gif ? gif.frames[0] : dataUrl];
+        } else {
+          frames = sliceFrames(img, fw, fh, sliceRects(width, height, fw, fh, layout.frameCount));
+        }
+
+        const sheet = frames.length > 1 ? await buildRowStrip(frames, fw, fh) : frames[0];
+        const isAnimated = frames.length > 1;
         const item: LibraryItem = {
           id: `item_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
           name: importedAssetName(file.name),
@@ -1002,14 +1053,14 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
           referencesUsed: [],
           createdAt: new Date().toISOString(),
           rawImage: dataUrl,
-          cleanedImage: dataUrl,
+          cleanedImage: sheet,
           frames,
           metadata: {
-            frameWidth: layout.frameWidth,
-            frameHeight: layout.frameHeight,
+            frameWidth: fw,
+            frameHeight: fh,
             frameCount: frames.length,
-            fps: layout.type === 'animation' ? 8 : 0,
-            baselineY: layout.frameHeight - 1,
+            fps: isAnimated ? gif?.fps || 8 : 0,
+            baselineY: fh - 1,
             facing: config.facing,
           },
         };
@@ -1102,7 +1153,7 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
             ) : (
               <AssetConfigPanel
                 config={config}
-                onChangeConfig={setConfig}
+                onChangeConfig={changeConfig}
                 onGenerate={() => handleGenerate()}
                 isGenerating={isGenerating}
                 activeProfile={activeProfile}
@@ -1264,6 +1315,16 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
         onImportFiles={handleImportFiles}
       />
 
+      {/* Import settings dialog */}
+      {importRequest && (
+        <ImportDialog
+          key={importRequest.request.fileName + importRequest.request.index}
+          request={importRequest.request}
+          onConfirm={(layout) => importRequest.resolve(layout)}
+          onSkip={() => importRequest.resolve(null)}
+        />
+      )}
+
       {/* Same-name dialog for new assets */}
       {nameConflict && (
         <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
@@ -1350,17 +1411,66 @@ function loadImage(src: string): Promise<HTMLImageElement> {
   });
 }
 
-function sliceStrip(img: HTMLImageElement, fw: number, fh: number, count: number): string[] {
+/** Cut frames (fw x fh) out of an image at the given top-left corners. */
+function sliceFrames(img: HTMLImageElement, fw: number, fh: number, rects: Array<{ x: number; y: number }>): string[] {
   const canvas = document.createElement('canvas');
   canvas.width = fw;
   canvas.height = fh;
   const ctx = canvas.getContext('2d')!;
   ctx.imageSmoothingEnabled = false;
-  const out: string[] = [];
-  for (let i = 0; i < count; i++) {
+  return rects.map(({ x, y }) => {
     ctx.clearRect(0, 0, fw, fh);
-    ctx.drawImage(img, i * fw, 0, fw, fh, 0, 0, fw, fh);
-    out.push(canvas.toDataURL('image/png'));
+    ctx.drawImage(img, x, y, fw, fh, 0, 0, fw, fh);
+    return canvas.toDataURL('image/png');
+  });
+}
+
+/** One horizontal row of frames, the same sheet layout generated animations use. */
+async function buildRowStrip(frames: string[], fw: number, fh: number): Promise<string> {
+  const canvas = document.createElement('canvas');
+  canvas.width = fw * frames.length;
+  canvas.height = fh;
+  const ctx = canvas.getContext('2d')!;
+  ctx.imageSmoothingEnabled = false;
+  for (let i = 0; i < frames.length; i++) {
+    ctx.drawImage(await loadImage(frames[i]), i * fw, 0);
   }
-  return out;
+  return canvas.toDataURL('image/png');
+}
+
+/**
+ * Decode every frame of a GIF with the browser's ImageDecoder (WebCodecs). Frames come
+ * back fully composited. Returns null where ImageDecoder isn't available, in which case
+ * only the first frame can be imported.
+ */
+async function decodeGifFrames(dataUrl: string): Promise<{ frames: string[]; fps: number } | null> {
+  const Decoder = (window as any).ImageDecoder;
+  if (!Decoder) return null;
+  try {
+    const data = await (await fetch(dataUrl)).arrayBuffer();
+    const decoder = new Decoder({ data, type: 'image/gif' });
+    await decoder.tracks.ready;
+    const count: number = decoder.tracks.selectedTrack?.frameCount || 1;
+    const frames: string[] = [];
+    let totalDuration = 0;
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d')!;
+    for (let i = 0; i < count; i++) {
+      const { image } = await decoder.decode({ frameIndex: i });
+      canvas.width = image.displayWidth;
+      canvas.height = image.displayHeight;
+      ctx.clearRect(0, 0, canvas.width, canvas.height);
+      ctx.drawImage(image, 0, 0);
+      frames.push(canvas.toDataURL('image/png'));
+      totalDuration += image.duration || 0; // microseconds
+      image.close();
+    }
+    decoder.close();
+    const avgMs = totalDuration > 0 ? totalDuration / count / 1000 : 0;
+    const fps = avgMs > 0 ? Math.min(24, Math.max(1, Math.round(1000 / avgMs))) : 8;
+    return { frames, fps };
+  } catch (err) {
+    console.warn('Could not decode GIF frames; importing the first frame only.', err);
+    return null;
+  }
 }

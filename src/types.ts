@@ -54,7 +54,11 @@ export interface GenerationConfig {
   animationMode: AnimationMode; // 'template' (default) or 'frame_by_frame'
   selectedModel: string;
   poseNotes: string[];
-  // Set when a preset is applied; the asset is named after the preset while the description is unchanged.
+  // Name the next generation is saved under (shown in the Asset Configuration "Name" field).
+  assetName: string;
+  // True once the user types their own name; until then the name follows the preset / suggestion.
+  assetNameEdited?: boolean;
+  // Set when a preset is applied; the name follows the preset while its description is unchanged.
   presetAssetName?: string;
   presetDescription?: string;
 }

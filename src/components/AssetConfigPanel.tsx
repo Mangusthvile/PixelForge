@@ -141,6 +141,7 @@ export const AssetConfigPanel: React.FC<AssetConfigPanelProps> = ({
       poseNotes,
       presetAssetName: getPresetAssetName(preset),
       presetDescription: preset.description,
+      assetNameEdited: false,
     });
     setShowPresetsMenu(false);
   };
@@ -388,6 +389,35 @@ export const AssetConfigPanel: React.FC<AssetConfigPanelProps> = ({
             );
           })}
         </div>
+      </div>
+
+      {/* Asset Name (what the next generation is saved as) */}
+      <div className="space-y-1">
+        <div className="flex items-center justify-between">
+          <label htmlFor="config-asset-name" className="text-[11px] font-medium text-zinc-400">
+            Name
+          </label>
+          {config.assetNameEdited && (
+            <button
+              onClick={() => onChangeConfig({ ...config, assetNameEdited: false })}
+              className="text-[10px] text-amber-400 hover:text-amber-300"
+              title="Go back to the preset / suggested name"
+            >
+              Use suggested
+            </button>
+          )}
+        </div>
+        <input
+          id="config-asset-name"
+          data-testid="config-asset-name"
+          type="text"
+          value={config.assetName}
+          onChange={(e) =>
+            onChangeConfig({ ...config, assetName: e.target.value, assetNameEdited: e.target.value.trim() !== '' })
+          }
+          placeholder="fig_idle"
+          className="w-full bg-zinc-950 border border-zinc-700 rounded px-2.5 py-1 text-xs font-mono text-zinc-100 focus:border-amber-500 focus:outline-none"
+        />
       </div>
 
       {/* 1. Sprite Fields */}

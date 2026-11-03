@@ -244,6 +244,7 @@ test('Template Fill Mode builds the exact required prompt instruction', async ()
   const action = 'walk cycle continuous 6 frames swinging arms and stepping legs';
   const built = buildGenerationPrompt(
     {
+      assetName: 'fig_walk',
       type: 'animation',
       description: action,
       facing: 'right',
@@ -307,24 +308,68 @@ test('nextVersionName picks the next free _vN suffix', async () => {
   assert.equal(nextVersionName('fig_idle_v2', [{ name: 'fig_idle_v2' }]), 'fig_idle_v3');
 });
 
-test('resolveAssetName uses the preset name only while the preset description is unchanged', async () => {
-  const { resolveAssetName } = await import('./naming.ts');
-  const base: any = { presetAssetName: 'fig_idle', presetDescription: 'idle stance', description: 'idle stance' };
-  assert.equal(resolveAssetName(base, 'fig_idle_stance'), 'fig_idle');
-  assert.equal(resolveAssetName({ ...base, description: 'something else' }, 'fig_something_else'), 'fig_something_else');
-  assert.equal(resolveAssetName(base, 'bg_idle_stance'), 'bg_idle_stance');
+test('suggested names: type prefix + main action/subject, max 2 words, max 20 chars', async () => {
+  const { suggestAssetName } = await import('./naming.ts');
+  assert.equal(suggestAssetName('animation', 'chop with axe'), 'fig_chop');
+  assert.equal(suggestAssetName('animation', 'walk cycle continuous 6 frames swinging arms and stepping legs'), 'fig_walk');
+  assert.equal(suggestAssetName('background', 'cave'), 'bg_cave');
+  assert.equal(suggestAssetName('background', 'deep subterranean cavern, stalactites'), 'bg_deep_subterranean'); // exactly 20
+  assert.equal(suggestAssetName('background', 'underground quarry tunnel'), 'bg_underground');
+  assert.equal(suggestAssetName('prop', 'collection of woodland props'), 'props_woodland_props');
+  assert.equal(suggestAssetName('effect', 'fire spark burst 4 frames'), 'fx_fire_spark');
+  assert.equal(suggestAssetName('sprite', ''), 'fig_asset');
+  for (const d of ['supercalifragilisticexpialidocious hero', 'raising a woodcutter axe overhead and swinging down']) {
+    assert.ok(suggestAssetName('animation', d).length <= 20, d);
+  }
 });
 
-test('imported files get clean names and strips become animations', async () => {
-  const { importedAssetName, classifyImport } = await import('./naming.ts');
+test('Name field follows presets until the user types a name, never the open asset', async () => {
+  const { withAutoName, generationAssetName } = await import('./naming.ts');
+  const base: any = { assetName: '', type: 'animation', description: 'idle stance' };
+
+  // Preset picked: name is the preset's name
+  const preset = withAutoName({ ...base, presetAssetName: 'fig_idle', presetDescription: 'idle stance' });
+  assert.equal(preset.assetName, 'fig_idle');
+  // Description edited away from the preset: suggestion instead
+  assert.equal(withAutoName({ ...preset, description: 'chop wood' }).assetName, 'fig_chop_wood');
+  // Typed name sticks through description changes
+  const typed = withAutoName({ ...preset, assetName: 'hero_idle', assetNameEdited: true, description: 'x' });
+  assert.equal(typed.assetName, 'hero_idle');
+  // Background preset
+  const bg = withAutoName({ ...base, type: 'background', description: 'lush woods', presetAssetName: 'bg_forest', presetDescription: 'lush woods' });
+  assert.equal(bg.assetName, 'bg_forest');
+  // The generation name is the sanitized Name field
+  assert.equal(generationAssetName({ ...base, assetName: ' My Hero!! ' }), 'my_hero');
+  assert.equal(generationAssetName({ ...base, assetName: '' }), 'fig_idle_stance');
+});
+
+test('import dialog pre-fills frame layout from the image size', async () => {
+  const { importedAssetName, guessImportLayout, sliceRects, maxFramesFor } = await import('./naming.ts');
   assert.equal(importedAssetName('Walk Cycle (2).png'), 'walk_cycle_2');
   assert.equal(importedAssetName('.png'), 'imported');
 
-  const anim = { type: 'animation', frameWidth: 24, frameHeight: 24 };
-  assert.deepEqual(classifyImport(144, 24, anim), { type: 'animation', frameWidth: 24, frameHeight: 24, frameCount: 6 });
-  assert.deepEqual(classifyImport(24, 24, anim), { type: 'sprite', frameWidth: 24, frameHeight: 24, frameCount: 1 });
-  assert.deepEqual(classifyImport(100, 24, anim), { type: 'sprite', frameWidth: 100, frameHeight: 24, frameCount: 1 });
-  assert.equal(classifyImport(320, 64, { type: 'background', frameWidth: 320, frameHeight: 64 }).type, 'background');
+  const anim = { type: 'animation' as const, frameWidth: 24, frameHeight: 24 };
+  // 96x24 with 24x24 frames = 4 frames
+  assert.deepEqual(guessImportLayout(96, 24, anim), { type: 'animation', frameWidth: 24, frameHeight: 24, frameCount: 4 });
+  // Generator frame size that doesn't fit the image: falls back to square frames
+  assert.deepEqual(
+    guessImportLayout(96, 24, { type: 'sprite', frameWidth: 40, frameHeight: 24 }),
+    { type: 'animation', frameWidth: 24, frameHeight: 24, frameCount: 4 }
+  );
+  // When the generator's frame size fits, it wins (96x24 at 32x24 = 3 frames)
+  assert.equal(guessImportLayout(96, 24, { type: 'animation', frameWidth: 32, frameHeight: 24 }).frameCount, 3);
+  // Single image
+  assert.deepEqual(guessImportLayout(24, 24, anim), { type: 'animation', frameWidth: 24, frameHeight: 24, frameCount: 1 });
+  // 2x2 grid of 24x24 frames
+  assert.equal(guessImportLayout(48, 48, anim).frameCount, 4);
+  // GIF: one frame per GIF frame
+  assert.deepEqual(guessImportLayout(24, 24, anim, 6), { type: 'animation', frameWidth: 24, frameHeight: 24, frameCount: 6 });
+  // Background
+  assert.equal(guessImportLayout(320, 64, { type: 'background', frameWidth: 320, frameHeight: 64 }).frameCount, 1);
+
+  assert.equal(maxFramesFor(96, 24, 24, 24), 4);
+  assert.deepEqual(sliceRects(48, 48, 24, 24, 3), [{ x: 0, y: 0 }, { x: 24, y: 0 }, { x: 0, y: 24 }]);
+  assert.equal(sliceRects(96, 24, 24, 24, 10).length, 4);
 });
 
 test('Template Fill scale is computed from the known grid, not detected', async () => {
