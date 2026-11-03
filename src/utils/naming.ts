@@ -26,3 +26,43 @@ export function sameFrames(a: string[] | undefined, b: string[]): boolean {
   for (let i = 0; i < a.length; i++) if (a[i] !== b[i]) return false;
   return true;
 }
+
+/** Library name for an imported file: "Walk Cycle (2).png" -> "walk_cycle_2". */
+export function importedAssetName(fileName: string): string {
+  return (
+    fileName
+      .replace(/\.[^.]+$/, '')
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '')
+      .slice(0, 40) || 'imported'
+  );
+}
+
+export interface ImportLayout {
+  type: 'animation' | 'sprite' | 'background';
+  frameWidth: number;
+  frameHeight: number;
+  frameCount: number;
+}
+
+/**
+ * Decide how to store an imported image. A horizontal strip whose height equals the
+ * configured frame height and whose width is a multiple of the frame width becomes an
+ * animation with one frame per cell. Otherwise it is a single-frame sprite (or a
+ * background when the generator is set to backgrounds).
+ */
+export function classifyImport(
+  width: number,
+  height: number,
+  cfg: { type: string; frameWidth: number; frameHeight: number }
+): ImportLayout {
+  if (cfg.type === 'background') {
+    return { type: 'background', frameWidth: width, frameHeight: height, frameCount: 1 };
+  }
+  const fw = cfg.frameWidth;
+  if (fw > 0 && height === cfg.frameHeight && width > fw && width % fw === 0) {
+    return { type: 'animation', frameWidth: fw, frameHeight: height, frameCount: width / fw };
+  }
+  return { type: 'sprite', frameWidth: width, frameHeight: height, frameCount: 1 };
+}

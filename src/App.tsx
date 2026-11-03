@@ -38,7 +38,13 @@ import { BackgroundPreview } from './components/BackgroundPreview';
 import { PixelEditorModal } from './components/PixelEditorModal';
 import { LibraryDrawer } from './components/LibraryDrawer';
 import { AssetNameBar, SaveStatus } from './components/AssetNameBar';
-import { resolveAssetName, nextVersionName, sameFrames } from './utils/naming';
+import {
+  resolveAssetName,
+  nextVersionName,
+  sameFrames,
+  importedAssetName,
+  classifyImport,
+} from './utils/naming';
 import { exportMultipleAssetsZip, downloadBlob } from './utils/export';
 import { AlertCircle, Sparkles, Palette, X } from 'lucide-react';
 
@@ -970,6 +976,48 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
     await persistItem({ ...item, name: newName });
   };
 
+  // Import image files from disk into the library
+  const handleImportFiles = async (files: File[]) => {
+    let lastImported: LibraryItem | null = null;
+    for (const file of files) {
+      try {
+        const dataUrl = await readFileAsDataUrl(file);
+        const img = await loadImage(dataUrl);
+        const layout = classifyImport(img.naturalWidth, img.naturalHeight, config);
+        const frames =
+          layout.frameCount > 1
+            ? sliceStrip(img, layout.frameWidth, layout.frameHeight, layout.frameCount)
+            : [dataUrl];
+        const item: LibraryItem = {
+          id: `item_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+          name: importedAssetName(file.name),
+          type: layout.type,
+          profileId: activeProfile.id,
+          profileName: activeProfile.name,
+          prompt: `Imported from ${file.name}`,
+          referencesUsed: [],
+          createdAt: new Date().toISOString(),
+          rawImage: dataUrl,
+          cleanedImage: dataUrl,
+          frames,
+          metadata: {
+            frameWidth: layout.frameWidth,
+            frameHeight: layout.frameHeight,
+            frameCount: frames.length,
+            fps: layout.type === 'animation' ? 8 : 0,
+            baselineY: layout.frameHeight - 1,
+            facing: config.facing,
+          },
+        };
+        const saved = await saveNewItem(item);
+        if (libraryRef.current.some((i) => i.id === saved.id)) lastImported = saved;
+      } catch (err) {
+        reportStorageError(`Couldn't import "${file.name}"`, err);
+      }
+    }
+    if (lastImported) handleSelectAndOpenItem(lastImported);
+  };
+
   const handleExportAll = async () => {
     if (library.length === 0) return;
     try {
@@ -1208,6 +1256,7 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
         onGenerateAgainWithChanges={handleGenerateAgainWithChanges}
         onDeleteItem={handleDeleteLibraryItem}
         onRenameItem={handleRenameLibraryItem}
+        onImportFiles={handleImportFiles}
       />
 
       {/* Same-name dialog for new assets */}
@@ -1276,4 +1325,37 @@ function sanitizeName(str: string): string {
       .replace(/^_+|_+$/g, '')
       .slice(0, 24) || 'item'
   );
+}
+
+function readFileAsDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result as string);
+    reader.onerror = () => reject(reader.error || new Error('Could not read file.'));
+    reader.readAsDataURL(file);
+  });
+}
+
+function loadImage(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+    img.onload = () => resolve(img);
+    img.onerror = () => reject(new Error('Not a readable image.'));
+    img.src = src;
+  });
+}
+
+function sliceStrip(img: HTMLImageElement, fw: number, fh: number, count: number): string[] {
+  const canvas = document.createElement('canvas');
+  canvas.width = fw;
+  canvas.height = fh;
+  const ctx = canvas.getContext('2d')!;
+  ctx.imageSmoothingEnabled = false;
+  const out: string[] = [];
+  for (let i = 0; i < count; i++) {
+    ctx.clearRect(0, 0, fw, fh);
+    ctx.drawImage(img, i * fw, 0, fw, fh, 0, 0, fw, fh);
+    out.push(canvas.toDataURL('image/png'));
+  }
+  return out;
 }

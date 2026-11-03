@@ -21,6 +21,7 @@ import {
   ChevronUp,
   ChevronDown,
   Archive,
+  Upload,
 } from 'lucide-react';
 import {
   downloadDataUrl,
@@ -37,6 +38,7 @@ interface LibraryDrawerProps {
   onGenerateAgainWithChanges: (item: LibraryItem) => void;
   onDeleteItem: (id: string) => void;
   onRenameItem: (id: string, newName: string) => void;
+  onImportFiles: (files: File[]) => void;
 }
 
 export const LibraryDrawer: React.FC<LibraryDrawerProps> = ({
@@ -46,6 +48,7 @@ export const LibraryDrawer: React.FC<LibraryDrawerProps> = ({
   onGenerateAgainWithChanges,
   onDeleteItem,
   onRenameItem,
+  onImportFiles,
 }) => {
   const [isExpanded, setIsExpanded] = useState(true);
   const [filterType, setFilterType] = useState<string>('all');
@@ -169,6 +172,25 @@ export const LibraryDrawer: React.FC<LibraryDrawerProps> = ({
 
         {/* Multi-Select & Export Actions */}
         <div className="flex items-center gap-2">
+          <label
+            className="flex items-center gap-1 px-2 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-xs text-zinc-200 hover:bg-zinc-700 cursor-pointer transition"
+            title="Add image files (PNG, GIF, WebP, JPG) to the library. A strip of frames matching the current frame size is split into an animation."
+          >
+            <Upload className="w-3.5 h-3.5 text-amber-400" />
+            <span>Import</span>
+            <input
+              type="file"
+              multiple
+              accept="image/png,image/gif,image/webp,image/jpeg"
+              data-testid="library-import-input"
+              className="hidden"
+              onChange={(e) => {
+                const files = Array.from(e.target.files || []);
+                e.target.value = '';
+                if (files.length > 0) onImportFiles(files);
+              }}
+            />
+          </label>
           {filtered.length > 0 && (
             <button
               onClick={selectAll}

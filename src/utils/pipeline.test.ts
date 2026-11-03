@@ -314,3 +314,15 @@ test('resolveAssetName uses the preset name only while the preset description is
   assert.equal(resolveAssetName({ ...base, description: 'something else' }, 'fig_something_else'), 'fig_something_else');
   assert.equal(resolveAssetName(base, 'bg_idle_stance'), 'bg_idle_stance');
 });
+
+test('imported files get clean names and strips become animations', async () => {
+  const { importedAssetName, classifyImport } = await import('./naming.ts');
+  assert.equal(importedAssetName('Walk Cycle (2).png'), 'walk_cycle_2');
+  assert.equal(importedAssetName('.png'), 'imported');
+
+  const anim = { type: 'animation', frameWidth: 24, frameHeight: 24 };
+  assert.deepEqual(classifyImport(144, 24, anim), { type: 'animation', frameWidth: 24, frameHeight: 24, frameCount: 6 });
+  assert.deepEqual(classifyImport(24, 24, anim), { type: 'sprite', frameWidth: 24, frameHeight: 24, frameCount: 1 });
+  assert.deepEqual(classifyImport(100, 24, anim), { type: 'sprite', frameWidth: 100, frameHeight: 24, frameCount: 1 });
+  assert.equal(classifyImport(320, 64, { type: 'background', frameWidth: 320, frameHeight: 64 }).type, 'background');
+});
