@@ -6,7 +6,7 @@ import {
   ProfileReference,
   PresetItem,
   StyleProfile,
-  AVAILABLE_IMAGE_MODELS,
+  ImageModelOption,
   AnimationMode,
 } from '../types';
 import {
@@ -29,6 +29,7 @@ import {
   ANIMATION_PRESETS,
   BACKGROUND_PRESETS,
   PROP_PRESETS,
+  getPresetAssetName,
 } from '../utils/presets';
 import {
   getGridDimensions,
@@ -44,6 +45,8 @@ interface AssetConfigPanelProps {
   activeProfile: StyleProfile;
   profiles: StyleProfile[];
   onSelectProfile: (profile: StyleProfile) => void;
+  models: ImageModelOption[];
+  modelsSource?: 'api' | 'fallback';
 }
 
 export const AssetConfigPanel: React.FC<AssetConfigPanelProps> = ({
@@ -54,6 +57,8 @@ export const AssetConfigPanel: React.FC<AssetConfigPanelProps> = ({
   activeProfile,
   profiles,
   onSelectProfile,
+  models,
+  modelsSource,
 }) => {
   const [showPresetsMenu, setShowPresetsMenu] = useState(false);
   const [showPoseNotes, setShowPoseNotes] = useState(true);
@@ -134,6 +139,8 @@ export const AssetConfigPanel: React.FC<AssetConfigPanelProps> = ({
       splitParallax: preset.splitParallax ?? config.splitParallax,
       propItems: preset.propItems || config.propItems,
       poseNotes,
+      presetAssetName: getPresetAssetName(preset),
+      presetDescription: preset.description,
     });
     setShowPresetsMenu(false);
   };
@@ -227,9 +234,7 @@ export const AssetConfigPanel: React.FC<AssetConfigPanelProps> = ({
 
   const gridDims = getGridDimensions(config.frameCount || 6);
   const bestAspect = getBestAspectRatio(gridDims.cols, gridDims.rows, config.frameWidth, config.frameHeight);
-  const currentModel =
-    AVAILABLE_IMAGE_MODELS.find((m) => m.id === (config.selectedModel || 'gemini-3-pro-image')) ||
-    AVAILABLE_IMAGE_MODELS[0];
+  const currentModel = models.find((m) => m.id === config.selectedModel) || null;
 
   return (
     <div className="bg-zinc-900/90 border border-zinc-800 rounded-lg p-3.5 space-y-4">
@@ -784,24 +789,30 @@ export const AssetConfigPanel: React.FC<AssetConfigPanelProps> = ({
             <Cpu className="w-3.5 h-3.5 text-amber-400" />
             <span>Image Model</span>
           </label>
-          <span className="text-[10px] font-mono text-amber-400/90 font-medium">
-            {currentModel.badge}
-          </span>
+          {modelsSource === 'fallback' && (
+            <span
+              className="text-[10px] font-mono text-red-400/90 font-medium"
+              title="Could not list models from the Gemini API; showing a fallback list. Check the server log."
+            >
+              fallback list
+            </span>
+          )}
         </div>
         <select
-          value={config.selectedModel || 'gemini-3-pro-image'}
+          value={config.selectedModel}
           onChange={(e) => handleModelChange(e.target.value)}
           className="w-full bg-zinc-900 border border-zinc-700 rounded px-2 py-1 text-xs text-zinc-100 font-medium focus:outline-none cursor-pointer"
         >
-          {AVAILABLE_IMAGE_MODELS.map((m) => (
+          {models.length === 0 && <option value={config.selectedModel}>Loading models…</option>}
+          {models.map((m) => (
             <option key={m.id} value={m.id}>
-              {m.name} — {m.badge}
+              {m.name} ({m.id})
             </option>
           ))}
         </select>
-        <p className="text-[10px] text-zinc-500 leading-tight">
-          {currentModel.description}
-        </p>
+        {currentModel?.description && (
+          <p className="text-[10px] text-zinc-500 leading-tight line-clamp-2">{currentModel.description}</p>
+        )}
       </div>
 
       {/* Extra References for this request */}

@@ -1,6 +1,6 @@
 import React from 'react';
 import { Sparkles, ShieldCheck, Download, RefreshCw, CheckCircle2 } from 'lucide-react';
-import { getModelOption } from '../types';
+import { getModelOption, ImageModelOption } from '../types';
 
 interface HeaderProps {
   onExportAll: () => void;
@@ -8,6 +8,7 @@ interface HeaderProps {
   onResetProfiles: () => void;
   selectedModelId?: string;
   lastUsedModelId?: string | null;
+  models: ImageModelOption[];
 }
 
 export const Header: React.FC<HeaderProps> = ({
@@ -16,10 +17,14 @@ export const Header: React.FC<HeaderProps> = ({
   onResetProfiles,
   selectedModelId,
   lastUsedModelId,
+  models,
 }) => {
-  const selectedModel = getModelOption(selectedModelId || 'gemini-3-pro-image');
-  const usedModel = lastUsedModelId ? getModelOption(lastUsedModelId) : null;
-  const isVerifiedUsed = Boolean(usedModel && usedModel.id === selectedModel.id);
+  const selectedModel = getModelOption(models, selectedModelId);
+  const usedModelId = lastUsedModelId || null;
+  // The API may report a more specific version id than the one requested, so match by prefix.
+  const isVerifiedUsed = Boolean(
+    usedModelId && selectedModel && (usedModelId === selectedModel.id || usedModelId.startsWith(selectedModel.id))
+  );
 
   return (
     <header className="h-14 bg-zinc-950 border-b border-zinc-800 px-4 flex items-center justify-between select-none">
@@ -44,9 +49,9 @@ export const Header: React.FC<HeaderProps> = ({
           data-testid="header-model-badge"
           className="flex items-center gap-2 px-2.5 py-1 rounded bg-zinc-900 border border-zinc-800 text-xs text-zinc-300 transition"
           title={
-            usedModel
-              ? `Currently targeting: ${selectedModel.name} • Last generation used: ${usedModel.name}`
-              : `Active Selected Model: ${selectedModel.name} (${selectedModel.badge})`
+            usedModelId
+              ? `Selected: ${selectedModel?.id ?? 'none'} • Last generation used: ${usedModelId}`
+              : `Selected model: ${selectedModel?.id ?? 'none'}`
           }
         >
           {isVerifiedUsed ? (
@@ -55,10 +60,12 @@ export const Header: React.FC<HeaderProps> = ({
             <ShieldCheck className="w-3.5 h-3.5 text-amber-400" />
           )}
           <span className="hidden md:inline text-zinc-400">Model:</span>
-          <span className="font-mono text-zinc-100 font-semibold">{selectedModel.name}</span>
-          <span className="text-[10px] px-1.5 py-0.2 rounded bg-zinc-800 text-amber-400 border border-zinc-700 hidden sm:inline">
-            {usedModel ? `Used: ${usedModel.badge.split(' ')[0]}` : selectedModel.badge.split(' ')[0]}
-          </span>
+          <span className="font-mono text-zinc-100 font-semibold">{selectedModel?.id ?? '…'}</span>
+          {usedModelId && (
+            <span className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-zinc-800 text-amber-400 border border-zinc-700 hidden sm:inline">
+              Used: {usedModelId}
+            </span>
+          )}
         </div>
 
         {libraryCount > 0 && (

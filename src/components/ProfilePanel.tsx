@@ -17,8 +17,10 @@ import {
   X,
   Sparkles,
   Info,
+  RotateCcw,
 } from 'lucide-react';
 import { extractPaletteFromImageUrl } from '../utils/canvasPipeline';
+import { getDefaultProfile } from '../utils/storage';
 
 interface ProfilePanelProps {
   profiles: StyleProfile[];
@@ -28,6 +30,7 @@ interface ProfilePanelProps {
   onCreateProfile: () => void;
   onDuplicateProfile: (profile: StyleProfile) => void;
   onDeleteProfile: (profileId: string) => void;
+  onResetProfileToDefaults: (profileId: string) => void;
 }
 
 export const ProfilePanel: React.FC<ProfilePanelProps> = ({
@@ -38,6 +41,7 @@ export const ProfilePanel: React.FC<ProfilePanelProps> = ({
   onCreateProfile,
   onDuplicateProfile,
   onDeleteProfile,
+  onResetProfileToDefaults,
 }) => {
   const [isRenaming, setIsRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(activeProfile.name);
@@ -231,6 +235,15 @@ export const ProfilePanel: React.FC<ProfilePanelProps> = ({
           >
             <Copy className="w-3.5 h-3.5" />
           </button>
+          {getDefaultProfile(activeProfile.id) && (
+            <button
+              onClick={() => onResetProfileToDefaults(activeProfile.id)}
+              className="p-1 hover:bg-zinc-800 rounded text-zinc-400 hover:text-amber-400 transition"
+              title={`Reset ${activeProfile.name} to defaults`}
+            >
+              <RotateCcw className="w-3.5 h-3.5" />
+            </button>
+          )}
           {profiles.length > 1 && (
             <button
               onClick={() => onDeleteProfile(activeProfile.id)}

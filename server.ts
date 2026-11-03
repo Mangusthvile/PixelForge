@@ -23,40 +23,100 @@ function getGeminiClient(): GoogleGenAI | null {
     apiKey,
     httpOptions: {
       headers: {
-        'User-Agent': 'aistudio-build',
+        'User-Agent': 'pixelforge-local',
       },
     },
   });
 }
 
-// Available Image Generation Models
-const AVAILABLE_MODELS = [
-  {
-    id: 'gemini-3-pro-image',
-    name: 'Gemini 3 Pro Image',
-    badge: 'Pro Quality (Default)',
-    description: 'Highest visual fidelity, exact adherence to pixel art references and proportions',
-    isDefault: true,
-  },
-  {
-    id: 'gemini-nano-banana-2.1',
-    name: 'Gemini Nano Banana 2.1',
-    badge: 'High-Res / 2K',
-    description: 'High-quality generation with expanded aspect ratio support and crisp edges',
-  },
-  {
-    id: 'gemini-3.1-flash-lite-image',
-    name: 'Gemini 3.1 Flash Lite Image',
-    badge: 'Fast Lite',
-    description: 'High throughput, fast draft generations and rapid iteration',
-  },
+// ---------------------------------------------------------------------------
+// Image model discovery
+// ---------------------------------------------------------------------------
+
+interface ImageModelInfo {
+  id: string;
+  name: string;
+  description?: string;
+}
+
+// Used only when the live models.list call fails (no key, network error, etc.).
+const FALLBACK_IMAGE_MODELS: ImageModelInfo[] = [
+  { id: 'gemini-3-pro-image', name: 'Gemini 3 Pro Image (fallback)' },
+  { id: 'gemini-3-pro-image-preview', name: 'Gemini 3 Pro Image Preview (fallback)' },
+  { id: 'gemini-2.5-flash-image', name: 'Gemini 2.5 Flash Image (fallback)' },
 ];
+
+let imageModels: ImageModelInfo[] = FALLBACK_IMAGE_MODELS;
+let defaultImageModel = FALLBACK_IMAGE_MODELS[0].id;
+let modelsSource: 'api' | 'fallback' = 'fallback';
+let modelsError: string | undefined;
+
+function pickDefaultModel(models: ImageModelInfo[]): string {
+  const pro3 = models.find((m) => m.id.startsWith('gemini-3-pro-image'));
+  return (pro3 || models[0]).id;
+}
+
+/**
+ * A model can produce images through generateContent if it advertises generateContent
+ * and is an image-output Gemini model. The list API does not expose output modalities,
+ * so we match on the "-image" id convention (e.g. gemini-3-pro-image-preview,
+ * gemini-2.5-flash-image). Imagen models use a different API (predict) and are excluded.
+ */
+function isImageOutputModel(id: string, actions: string[] | undefined): boolean {
+  if (!actions?.includes('generateContent')) return false;
+  if (!id.startsWith('gemini')) return false;
+  return /-image(-|$)/.test(id);
+}
+
+async function loadImageModels(): Promise<void> {
+  const ai = getGeminiClient();
+  if (!ai) {
+    modelsError = 'GEMINI_API_KEY is not set.';
+    console.warn(
+      `[PixelForge] ${modelsError} Using fallback model list: ${FALLBACK_IMAGE_MODELS.map((m) => m.id).join(', ')}`
+    );
+    return;
+  }
+
+  try {
+    const found: ImageModelInfo[] = [];
+    const pager = await ai.models.list({ config: { pageSize: 200 } });
+    for await (const m of pager) {
+      const id = (m.name || '').replace(/^models\//, '');
+      if (!id || !isImageOutputModel(id, m.supportedActions)) continue;
+      found.push({ id, name: m.displayName || id, description: m.description });
+    }
+
+    if (found.length === 0) {
+      throw new Error('models.list returned no image-capable models');
+    }
+
+    found.sort((a, b) => a.id.localeCompare(b.id));
+    imageModels = found;
+    defaultImageModel = pickDefaultModel(found);
+    modelsSource = 'api';
+    modelsError = undefined;
+    console.log(
+      `[PixelForge] Image models available: ${found.map((m) => m.id).join(', ')} (default: ${defaultImageModel})`
+    );
+  } catch (err: any) {
+    modelsError = err?.message || String(err);
+    imageModels = FALLBACK_IMAGE_MODELS;
+    defaultImageModel = pickDefaultModel(FALLBACK_IMAGE_MODELS);
+    modelsSource = 'fallback';
+    console.warn(
+      `[PixelForge] Listing models failed (${modelsError}). Using fallback model list: ${FALLBACK_IMAGE_MODELS.map((m) => m.id).join(', ')}`
+    );
+  }
+}
 
 // Models List Endpoint
 app.get('/api/models', (_req: Request, res: Response) => {
   res.json({
-    models: AVAILABLE_MODELS,
-    defaultModel: 'gemini-3-pro-image',
+    models: imageModels,
+    defaultModel: defaultImageModel,
+    source: modelsSource,
+    error: modelsError,
   });
 });
 
@@ -67,7 +127,7 @@ app.post('/api/generate', async (req: Request, res: Response) => {
     references = [],
     aspectRatio = '1:1',
     type = 'sprite',
-    model = 'gemini-3-pro-image',
+    model,
     templateImage,
   } = req.body;
 
@@ -79,7 +139,7 @@ app.post('/api/generate', async (req: Request, res: Response) => {
 
   if (!ai) {
     return res.status(400).json({
-      error: 'GEMINI_API_KEY is not configured in your environment or Secrets panel.',
+      error: 'GEMINI_API_KEY is not set. Add it to the .env file in the project root and restart the server.',
       needsApiKey: true,
     });
   }
@@ -116,8 +176,8 @@ app.post('/api/generate', async (req: Request, res: Response) => {
       text: prompt,
     });
 
-    // Pick target model, default to highest quality gemini-3-pro-image
-    const targetModel = model || 'gemini-3-pro-image';
+    // Use the requested model, or the discovered default (Gemini 3 Pro Image when available)
+    const targetModel: string = model || defaultImageModel;
     console.log(`[PixelForge API] /api/generate invoking Gemini model: ${targetModel} (aspectRatio: ${aspectRatio})`);
 
     const response = await ai.models.generateContent({
@@ -154,10 +214,12 @@ app.post('/api/generate', async (req: Request, res: Response) => {
     return res.json({
       success: true,
       image: imageDataUrl,
-      modelUsed: targetModel,
+      // Report the model that actually served the request when the API tells us.
+      modelUsed: response.modelVersion || targetModel,
+      modelRequested: targetModel,
     });
   } catch (error: any) {
-    console.error('Error generating image via Gemini API:', error);
+    console.error(`Error generating image via Gemini API (model: ${model || defaultImageModel}):`, error);
     const errorMessage = error?.message || 'Failed to generate image via Gemini API.';
     const isPaidKeyError =
       errorMessage.includes('RESOURCE_EXHAUSTED') ||
@@ -177,6 +239,8 @@ app.post('/api/generate', async (req: Request, res: Response) => {
 });
 
 async function startServer() {
+  await loadImageModels();
+
   const isProd = process.env.NODE_ENV === 'production';
 
   if (!isProd) {

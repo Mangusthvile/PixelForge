@@ -1,11 +1,11 @@
-import React, { useState, useEffect, useCallback } from 'react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
   StyleProfile,
   GenerationConfig,
   CleanupSettings,
   LibraryItem,
   ParallaxLayer,
-  AVAILABLE_IMAGE_MODELS,
+  ImageModelOption,
   AnimationMode,
 } from './types';
 import {
@@ -16,6 +16,8 @@ import {
   getStoredLibrary,
   saveLibraryItem,
   deleteLibraryItem,
+  runStartupMaintenance,
+  getDefaultProfile,
   INITIAL_CHARACTERS_PROFILE,
   INITIAL_BACKGROUNDS_PROFILE,
 } from './utils/storage';
@@ -35,8 +37,12 @@ import { AnimationPreview } from './components/AnimationPreview';
 import { BackgroundPreview } from './components/BackgroundPreview';
 import { PixelEditorModal } from './components/PixelEditorModal';
 import { LibraryDrawer } from './components/LibraryDrawer';
+import { AssetNameBar, SaveStatus } from './components/AssetNameBar';
+import { resolveAssetName, nextVersionName, sameFrames } from './utils/naming';
 import { exportMultipleAssetsZip, downloadBlob } from './utils/export';
-import { AlertCircle, RefreshCw, Sparkles, Check, Palette } from 'lucide-react';
+import { AlertCircle, Sparkles, Palette, X } from 'lucide-react';
+
+type NameConflictChoice = 'replace' | 'version' | 'cancel';
 
 export default function App() {
   // Profiles State
@@ -48,10 +54,9 @@ export default function App() {
 
   // Asset Generation Config
   const [config, setConfig] = useState<GenerationConfig>(() => {
+    // Small setting, kept in localStorage. Validated against the real model list once it loads.
     const savedModel =
-      typeof window !== 'undefined'
-        ? localStorage.getItem('pixelforge_selected_model') || 'gemini-3-pro-image'
-        : 'gemini-3-pro-image';
+      typeof window !== 'undefined' ? localStorage.getItem('pixelforge_selected_model') || '' : '';
 
     const defaultAction = 'walk cycle continuous 6 frames swinging arms and stepping legs';
 
@@ -97,7 +102,7 @@ export default function App() {
   const [copyWarning, setCopyWarning] = useState<string | undefined>();
   const [baselineY, setBaselineY] = useState<number>(-1);
   const [parallaxLayers, setParallaxLayers] = useState<ParallaxLayer[] | undefined>();
-  const [currentAssetName, setCurrentAssetName] = useState<string>('fig_walk');
+  const [currentAssetName, setCurrentAssetName] = useState<string>('');
   const [isGenerating, setIsGenerating] = useState(false);
   const [generationProgressText, setGenerationProgressText] = useState<string>('');
   const [error, setError] = useState<string | null>(null);
@@ -110,9 +115,157 @@ export default function App() {
   const [pixelEditorOpen, setPixelEditorOpen] = useState(false);
   const [editingFrameIndex, setEditingFrameIndex] = useState<number | undefined>(undefined);
 
+  // Image models (discovered by the server from the Gemini models list API)
+  const [models, setModels] = useState<ImageModelOption[]>([]);
+  const [modelsSource, setModelsSource] = useState<'api' | 'fallback' | undefined>();
+  const [defaultModel, setDefaultModel] = useState<string>('');
+
   // Library State
   const [library, setLibrary] = useState<LibraryItem[]>([]);
-  const [isSavedToLibrary, setIsSavedToLibrary] = useState(false);
+  const libraryRef = useRef<LibraryItem[]>([]);
+  // The library record behind the asset currently shown (may not be saved yet).
+  const [openItem, setOpenItem] = useState<LibraryItem | null>(null);
+  const [saveStatus, setSaveStatus] = useState<SaveStatus>('idle');
+  const [saveError, setSaveError] = useState<string | null>(null);
+  const [nameConflict, setNameConflict] = useState<{
+    name: string;
+    versionName: string;
+    resolve: (choice: NameConflictChoice) => void;
+  } | null>(null);
+
+  const isOpenItemInLibrary = Boolean(openItem && library.some((i) => i.id === openItem.id));
+
+  const updateLibrary = (fn: (prev: LibraryItem[]) => LibraryItem[]) => {
+    const next = fn(libraryRef.current);
+    libraryRef.current = next;
+    setLibrary(next);
+  };
+
+  const reportStorageError = (context: string, err: unknown) => {
+    const msg = err instanceof Error ? err.message : String(err);
+    console.error(`${context}:`, err);
+    setSaveError(`${context}: ${msg}`);
+  };
+
+  /** Write one item to IndexedDB, then reflect it in the library list. Returns true on success. */
+  const persistItem = async (item: LibraryItem): Promise<boolean> => {
+    setSaveStatus('saving');
+    try {
+      await saveLibraryItem(item);
+      updateLibrary((prev) => {
+        const idx = prev.findIndex((i) => i.id === item.id);
+        if (idx === -1) return [item, ...prev];
+        const next = [...prev];
+        next[idx] = item;
+        return next;
+      });
+      setSaveStatus('saved');
+      setSaveError(null);
+      return true;
+    } catch (err) {
+      setSaveStatus('error');
+      reportStorageError(`Couldn't save "${item.name}" to the library`, err);
+      return false;
+    }
+  };
+
+  const askNameConflict = (name: string, versionName: string) =>
+    new Promise<NameConflictChoice>((resolve) => {
+      setNameConflict({
+        name,
+        versionName,
+        resolve: (choice) => {
+          setNameConflict(null);
+          resolve(choice);
+        },
+      });
+    });
+
+  /**
+   * Save a brand-new asset. If another library item already has its name, ask whether to
+   * replace it or save as a new version (name_v2, name_v3, ...).
+   */
+  const saveNewItem = async (item: LibraryItem): Promise<LibraryItem> => {
+    const existing = libraryRef.current.find((i) => i.name === item.name && i.id !== item.id);
+    let finalItem = item;
+    if (existing) {
+      const versionName = nextVersionName(item.name, libraryRef.current);
+      const choice = await askNameConflict(item.name, versionName);
+      if (choice === 'cancel') {
+        setSaveStatus('idle');
+        return item;
+      }
+      finalItem =
+        choice === 'replace' ? { ...item, id: existing.id } : { ...item, name: versionName };
+    }
+    await persistItem(finalItem);
+    return finalItem;
+  };
+
+  /** Make a freshly generated item the open asset and save it. */
+  const openAndSaveNewItem = async (item: LibraryItem) => {
+    setOpenItem(item);
+    const finalItem = await saveNewItem(item);
+    setOpenItem(finalItem);
+    setCurrentAssetName(finalItem.name);
+  };
+
+  // Auto-save: any change to the open asset (frames, cleaned sheet, name, fps) updates its library entry.
+  useEffect(() => {
+    if (!openItem || !cleanedImage) return;
+    const stored = library.find((i) => i.id === openItem.id);
+    if (!stored) return; // not in the library yet; "Save to Library" adds it
+    const name = currentAssetName.trim() || stored.name;
+    const changed =
+      stored.name !== name ||
+      stored.cleanedImage !== cleanedImage ||
+      stored.metadata.fps !== fps ||
+      !sameFrames(stored.frames, frames);
+    if (!changed) return;
+
+    const timer = setTimeout(() => {
+      persistItem({
+        ...stored,
+        name,
+        cleanedImage,
+        frames,
+        metadata: { ...stored.metadata, fps, frameCount: frames.length },
+      });
+    }, 400);
+    return () => clearTimeout(timer);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [openItem, library, currentAssetName, cleanedImage, frames, fps]);
+
+  // Fade the "Saved" indicator back to idle after a moment.
+  useEffect(() => {
+    if (saveStatus !== 'saved') return;
+    const t = setTimeout(() => setSaveStatus('idle'), 2500);
+    return () => clearTimeout(t);
+  }, [saveStatus]);
+
+  const handleManualSave = async () => {
+    if (!openItem || !cleanedImage) return;
+    const snapshot: LibraryItem = {
+      ...openItem,
+      name: currentAssetName.trim() || openItem.name,
+      cleanedImage,
+      frames,
+      metadata: { ...openItem.metadata, fps, frameCount: frames.length },
+    };
+    if (libraryRef.current.some((i) => i.id === snapshot.id)) {
+      const stored = libraryRef.current.find((i) => i.id === snapshot.id)!;
+      await persistItem({ ...stored, ...snapshot, metadata: { ...stored.metadata, ...snapshot.metadata } });
+    } else {
+      await openAndSaveNewItem(snapshot);
+    }
+  };
+
+  const handleRenameOpenAsset = (name: string) => {
+    setCurrentAssetName(name);
+    if (openItem && !libraryRef.current.some((i) => i.id === openItem.id)) {
+      setOpenItem({ ...openItem, name });
+    }
+  };
 
   // Helper: Convert URL to base64
   const urlToBase64 = async (url: string): Promise<string> => {
@@ -129,125 +282,60 @@ export default function App() {
     }
   };
 
-  // Load Initial Storage & Seed
+  // Load profiles + library from IndexedDB, and the real model list from the server
   useEffect(() => {
     async function init() {
-      const storedProfiles = await getStoredProfiles();
-      if (storedProfiles && storedProfiles.length > 0) {
-        setProfiles(storedProfiles);
-        setActiveProfile(storedProfiles[0]);
-      }
-
-      const storedLib = await getStoredLibrary();
-
-      // If library is empty, seed 2 starter assets
-      if (!storedLib || storedLib.length === 0) {
-        const sampleBgUrl = '/assets/aistudio/image_e2a4566b.png';
-        const sampleCharUrl = '/assets/anchor_figure_right_facing.png';
-
-        const starterItems: LibraryItem[] = [
-          {
-            id: 'item_seed_idle',
-            name: 'fig_idle',
-            type: 'animation',
-            profileId: INITIAL_CHARACTERS_PROFILE.id,
-            profileName: INITIAL_CHARACTERS_PROFILE.name,
-            prompt: 'chibi character idle stance in 24x24 cell on magenta',
-            referencesUsed: ['Right-Facing Figure Anchor (8x on Magenta)'],
-            createdAt: new Date().toISOString(),
-            rawImage: sampleCharUrl,
-            cleanedImage: sampleCharUrl,
-            frames: [sampleCharUrl],
-            metadata: {
-              frameWidth: 24,
-              frameHeight: 24,
-              frameCount: 1,
-              fps: 8,
-              baselineY: 23,
-              facing: 'right',
-            },
-          },
-          {
-            id: 'item_seed_bg',
-            name: 'bg_pine_hills',
-            type: 'background',
-            profileId: INITIAL_BACKGROUNDS_PROFILE.id,
-            profileName: INITIAL_BACKGROUNDS_PROFILE.name,
-            prompt: 'rolling pine hills with layered atmospheric perspective',
-            referencesUsed: ['Rolling Pine Hills (Anchor)'],
-            createdAt: new Date().toISOString(),
-            rawImage: sampleBgUrl,
-            cleanedImage: sampleBgUrl,
-            frames: [sampleBgUrl],
-            metadata: {
-              frameWidth: 320,
-              frameHeight: 64,
-              frameCount: 1,
-              fps: 0,
-              baselineY: 0,
-              tiling: true,
-            },
-          },
-        ];
-        setLibrary(starterItems);
-        starterItems.forEach((it) => saveLibraryItem(it));
-      } else {
-        setLibrary(storedLib);
-      }
-
-      // Pre-seed sample character into preview on first visit
-      const sampleUrl = '/assets/anchor_figure_right_facing.png';
-      setRawImage(sampleUrl);
       try {
-        const result = await runCleanupPipeline(
-          sampleUrl,
-          {
-            type: 'animation',
-            description: 'idle stance',
-            facing: 'right',
-            frameWidth: 24,
-            frameHeight: 24,
-            frameCount: 1,
-            propItems: '',
-            tilingSeamless: true,
-            splitParallax: false,
-            effectItems: '',
-            framesPerEffect: 4,
-            extraReferences: [],
-            animationMode: 'template',
-            selectedModel: 'gemini-3-pro-image',
-            poseNotes: ['neutral idle stance'],
-          },
-          INITIAL_CHARACTERS_PROFILE,
-          {
-            keyMagenta: true,
-            magentaTolerance: 35,
-            pixelSnap: true,
-            detectedScale: 1,
-            scaleOverride: 0,
-            paletteLock: true,
-            removeStrayPixels: true,
-            sliceFrames: true,
-            frameCountOverride: 1,
-            baselineY: -1,
-          }
-        );
-        setCleanedImage(result.cleanedDataUrl);
-        setFrames(result.frames);
-        setDetectedScale(result.detectedScale);
-        setCurrentAssetName('fig_idle');
-      } catch (e) {
-        console.error('Failed to run initial cleanup pipeline:', e);
+        await runStartupMaintenance();
+      } catch (err) {
+        reportStorageError('Storage cleanup failed', err);
+      }
+
+      try {
+        const storedProfiles = await getStoredProfiles();
+        if (storedProfiles.length > 0) {
+          setProfiles(storedProfiles);
+          setActiveProfile(storedProfiles[0]);
+        }
+      } catch (err) {
+        reportStorageError("Couldn't load style profiles", err);
+      }
+
+      try {
+        const storedLib = await getStoredLibrary();
+        updateLibrary(() => storedLib);
+      } catch (err) {
+        reportStorageError("Couldn't load the library", err);
       }
     }
+
+    async function loadModels() {
+      try {
+        const res = await fetch('/api/models');
+        const data = await res.json();
+        const list: ImageModelOption[] = Array.isArray(data.models) ? data.models : [];
+        setModels(list);
+        setModelsSource(data.source);
+        setDefaultModel(data.defaultModel || list[0]?.id || '');
+        setConfig((prev) =>
+          list.some((m) => m.id === prev.selectedModel)
+            ? prev
+            : { ...prev, selectedModel: data.defaultModel || list[0]?.id || '' }
+        );
+      } catch (err) {
+        console.error('Failed to load model list:', err);
+      }
+    }
+
     init();
+    loadModels();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Update Config when Profile changes
-  const handleSelectProfile = async (p: StyleProfile) => {
+  const handleSelectProfile = (p: StyleProfile) => {
     setActiveProfile(p);
     if (p.name.toLowerCase().includes('background')) {
-      const bgUrl = '/assets/aistudio/image_e2a4566b.png';
       setConfig((prev) => ({
         ...prev,
         type: 'background',
@@ -257,40 +345,7 @@ export default function App() {
         tilingSeamless: true,
         splitParallax: true,
       }));
-      setRawImage(bgUrl);
-      setCurrentAssetName('bg_pine_hills');
-      try {
-        const res = await runCleanupPipeline(
-          bgUrl,
-          {
-            type: 'background',
-            description: 'dense alpine evergreen pines',
-            facing: 'right',
-            frameWidth: 320,
-            frameHeight: 64,
-            frameCount: 1,
-            propItems: '',
-            tilingSeamless: true,
-            splitParallax: true,
-            effectItems: '',
-            framesPerEffect: 4,
-            extraReferences: [],
-            animationMode: 'template',
-            selectedModel: config.selectedModel,
-            poseNotes: [],
-          },
-          p,
-          settings
-        );
-        setCleanedImage(res.cleanedDataUrl);
-        setFrames(res.frames);
-        setParallaxLayers(res.parallaxLayers);
-        setActiveTab('preview');
-      } catch (e) {
-        // ignore
-      }
     } else {
-      const charUrl = '/assets/anchor_figure_right_facing.png';
       const actionDesc = 'walk cycle continuous 6 frames swinging arms and stepping legs';
       setConfig((prev) => ({
         ...prev,
@@ -301,8 +356,6 @@ export default function App() {
         frameCount: 6,
         poseNotes: generatePoseNotes(actionDesc, 6),
       }));
-      setRawImage(charUrl);
-      setCurrentAssetName('fig_walk');
     }
   };
 
@@ -310,7 +363,7 @@ export default function App() {
   const handleUpdateProfile = (updated: StyleProfile) => {
     setActiveProfile(updated);
     setProfiles((prev) => prev.map((p) => (p.id === updated.id ? updated : p)));
-    saveProfile(updated);
+    saveProfile(updated).catch((err) => reportStorageError(`Couldn't save profile "${updated.name}"`, err));
   };
 
   const handleCreateProfile = () => {
@@ -327,7 +380,7 @@ export default function App() {
     const updated = [...profiles, newProf];
     setProfiles(updated);
     setActiveProfile(newProf);
-    saveAllProfiles(updated);
+    saveAllProfiles(updated).catch((err) => reportStorageError("Couldn't save profiles", err));
   };
 
   const handleDuplicateProfile = (source: StyleProfile) => {
@@ -341,7 +394,7 @@ export default function App() {
     const updated = [...profiles, copy];
     setProfiles(updated);
     setActiveProfile(copy);
-    saveAllProfiles(updated);
+    saveAllProfiles(updated).catch((err) => reportStorageError("Couldn't save profiles", err));
   };
 
   const handleDeleteProfile = (id: string) => {
@@ -349,16 +402,26 @@ export default function App() {
     const remaining = profiles.filter((p) => p.id !== id);
     setProfiles(remaining);
     setActiveProfile(remaining[0]);
-    deleteProfileFromDB(id);
+    deleteProfileFromDB(id).catch((err) => reportStorageError("Couldn't delete profile", err));
   };
 
   const handleResetProfiles = () => {
-    if (confirm('Reset to built-in Characters and Backgrounds profiles?')) {
+    if (confirm('Reset ALL profiles to the built-in Characters and Backgrounds defaults? Custom profiles will be removed.')) {
       const defaults = [INITIAL_CHARACTERS_PROFILE, INITIAL_BACKGROUNDS_PROFILE];
       setProfiles(defaults);
       setActiveProfile(defaults[0]);
-      saveAllProfiles(defaults);
+      saveAllProfiles(defaults).catch((err) => reportStorageError("Couldn't reset profiles", err));
     }
+  };
+
+  // Reset a single built-in profile (e.g. Characters) back to its shipped defaults
+  const handleResetProfileToDefaults = (id: string) => {
+    const def = getDefaultProfile(id);
+    if (!def) return;
+    if (!confirm(`Reset "${def.name}" to its default settings? Your changes to this profile will be lost.`)) return;
+    setProfiles((prev) => prev.map((p) => (p.id === id ? def : p)));
+    if (activeProfile.id === id) setActiveProfile(def);
+    saveProfile(def).catch((err) => reportStorageError(`Couldn't reset profile "${def.name}"`, err));
   };
 
   // Re-run cleanup pipeline whenever settings or profile change
@@ -396,7 +459,9 @@ export default function App() {
     setIsGenerating(true);
     setError(null);
     setCopyWarning(undefined);
-    setIsSavedToLibrary(false);
+    // Detach the previous asset so intermediate results never overwrite its library entry.
+    setOpenItem(null);
+    setSaveStatus('idle');
     setGenerationProgressText('Preparing style references & prompt...');
 
     try {
@@ -444,7 +509,7 @@ export default function App() {
       // If no anchor base64, load default right-facing anchor
       let anchorBase64 = anchor?.base64 || '';
       if (!anchorBase64) {
-        anchorBase64 = await urlToBase64('/assets/anchor_figure_right_facing.png');
+        anchorBase64 = await urlToBase64(INITIAL_CHARACTERS_PROFILE.references[0].url);
       }
 
       // MODE A: FRAME BY FRAME GENERATION
@@ -452,6 +517,7 @@ export default function App() {
         const totalFrames = currentConfig.frameCount || 6;
         const accumulatedFrames: string[] = [];
         let lastFrameBase64 = '';
+        let frameModelUsed = '';
 
         for (let f = 0; f < totalFrames; f++) {
           setGenerationProgressText(`Generating frame ${f + 1} of ${totalFrames}...`);
@@ -479,7 +545,7 @@ export default function App() {
               references: frameRefs,
               aspectRatio: '1:1',
               type: 'sprite',
-              model: currentConfig.selectedModel || 'gemini-3-pro-image',
+              model: currentConfig.selectedModel || undefined,
             }),
           });
 
@@ -490,6 +556,7 @@ export default function App() {
 
           if (data.modelUsed) {
             setLastUsedModel(data.modelUsed);
+            frameModelUsed = data.modelUsed;
           }
 
           // Run single-frame cleanup
@@ -524,12 +591,13 @@ export default function App() {
         setRawImage(assembledUrl);
         setCleanedImage(assembledUrl);
         setFrames(accumulatedFrames);
-        setCurrentAssetName(`fig_${sanitizeName(currentConfig.description)}`);
+        const fbfName = resolveAssetName(currentConfig, `fig_${sanitizeName(currentConfig.description)}`);
+        setCurrentAssetName(fbfName);
 
         // Save to library
         const newItem: LibraryItem = {
           id: `item_${Date.now()}`,
-          name: `fig_${sanitizeName(currentConfig.description)}`,
+          name: fbfName,
           type: currentConfig.type,
           profileId: targetProfile.id,
           profileName: targetProfile.name,
@@ -543,18 +611,16 @@ export default function App() {
             frameWidth: currentConfig.frameWidth,
             frameHeight: currentConfig.frameHeight,
             frameCount: totalFrames,
-            fps: 8,
+            fps,
             baselineY: currentConfig.frameHeight - 2,
             facing: currentConfig.facing,
-            modelUsed: currentConfig.selectedModel,
+            modelUsed: frameModelUsed || currentConfig.selectedModel,
             animationMode: 'frame_by_frame',
             poseNotes: currentConfig.poseNotes,
           },
         };
-        await saveLibraryItem(newItem);
-        setLibrary((prev) => [newItem, ...prev]);
-        setIsSavedToLibrary(true);
         setActiveTab('preview');
+        await openAndSaveNewItem(newItem);
         return;
       }
 
@@ -574,11 +640,12 @@ export default function App() {
         );
       }
 
-      setGenerationProgressText(`Sending request to ${currentConfig.selectedModel || 'gemini-3-pro-image'}...`);
+      setGenerationProgressText(`Sending request to ${currentConfig.selectedModel || 'default model'}...`);
 
       // 2. Build Prompt
       const builtPrompt = buildGenerationPrompt(currentConfig, enrichedProfile);
-      setCurrentAssetName(builtPrompt.assetName);
+      const assetName = resolveAssetName(currentConfig, builtPrompt.assetName);
+      setCurrentAssetName(assetName);
 
       // 3. Call Server API
       const response = await fetch('/api/generate', {
@@ -589,7 +656,7 @@ export default function App() {
           references: builtPrompt.referenceImages,
           aspectRatio: builtPrompt.aspectRatio,
           type: currentConfig.type,
-          model: currentConfig.selectedModel || 'gemini-3-pro-image',
+          model: currentConfig.selectedModel || undefined,
           templateImage: templateImageBase64,
         }),
       });
@@ -624,7 +691,7 @@ export default function App() {
 
         const newItem: LibraryItem = {
           id: `item_${Date.now()}`,
-          name: builtPrompt.assetName,
+          name: assetName,
           type: currentConfig.type,
           profileId: targetProfile.id,
           profileName: targetProfile.name,
@@ -638,19 +705,17 @@ export default function App() {
             frameWidth: currentConfig.frameWidth,
             frameHeight: currentConfig.frameHeight,
             frameCount: pipelineRes.frames.length,
-            fps: 8,
+            fps,
             baselineY: pipelineRes.baselineY,
             facing: currentConfig.facing,
             tiling: currentConfig.tilingSeamless,
             parallaxLayers: pipelineRes.parallaxLayers,
-            modelUsed: currentConfig.selectedModel,
+            modelUsed: data.modelUsed || currentConfig.selectedModel,
             animationMode: currentConfig.animationMode,
             poseNotes: currentConfig.poseNotes,
           },
         };
-        await saveLibraryItem(newItem);
-        setLibrary((prev) => [newItem, ...prev]);
-        setIsSavedToLibrary(true);
+        await openAndSaveNewItem(newItem);
       }
     } catch (err: any) {
       console.error('Generation failure:', err);
@@ -671,66 +736,16 @@ export default function App() {
 
   // Select Stronger Model handler (from copy warning banner)
   const handleSelectStrongerModel = () => {
-    const updated = { ...config, selectedModel: 'gemini-3-pro-image' };
+    const strongest = defaultModel || config.selectedModel;
+    const updated = { ...config, selectedModel: strongest };
     setConfig(updated);
     try {
-      localStorage.setItem('pixelforge_selected_model', 'gemini-3-pro-image');
+      localStorage.setItem('pixelforge_selected_model', strongest);
     } catch (e) {
       // ignore
     }
     setCopyWarning(undefined);
     handleGenerate(updated);
-  };
-
-  // Fallback demo generation using preloaded style reference
-  const handleTrySampleGeneration = async () => {
-    setIsGenerating(true);
-    setError(null);
-    try {
-      const sampleUrl =
-        config.type === 'background'
-          ? '/assets/aistudio/image_e2a4566b.png'
-          : '/assets/anchor_figure_right_facing.png';
-
-      const b64 = await urlToBase64(sampleUrl);
-      setRawImage(b64);
-      const res = await rerunPipeline(b64);
-
-      if (res) {
-        const name = config.type === 'background' ? 'bg_pine_hills' : 'fig_idle';
-        setCurrentAssetName(name);
-        const newItem: LibraryItem = {
-          id: `item_${Date.now()}`,
-          name,
-          type: config.type,
-          profileId: activeProfile.id,
-          profileName: activeProfile.name,
-          prompt: 'Sample reference pipeline demonstration',
-          referencesUsed: ['Base Anchor'],
-          createdAt: new Date().toISOString(),
-          rawImage: b64,
-          cleanedImage: res.cleanedDataUrl,
-          frames: res.frames,
-          metadata: {
-            frameWidth: config.frameWidth,
-            frameHeight: config.frameHeight,
-            frameCount: res.frames.length,
-            fps: 8,
-            baselineY: res.baselineY,
-            facing: config.facing,
-            tiling: config.tilingSeamless,
-            parallaxLayers: res.parallaxLayers,
-          },
-        };
-        await saveLibraryItem(newItem);
-        setLibrary((prev) => [newItem, ...prev]);
-        setIsSavedToLibrary(true);
-      }
-    } catch (e: any) {
-      setError('Sample generation failed: ' + e?.message);
-    } finally {
-      setIsGenerating(false);
-    }
   };
 
   // Approve current cleaned image as a reference
@@ -862,7 +877,7 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
           references: neighborRefs,
           aspectRatio: '1:1',
           type: 'sprite',
-          model: config.selectedModel || 'gemini-3-pro-image',
+          model: config.selectedModel || undefined,
         }),
       });
 
@@ -913,6 +928,10 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
     setCleanedImage(item.cleanedImage);
     setFrames(item.frames || [item.cleanedImage]);
     setCurrentAssetName(item.name);
+    setFps(item.metadata.fps ?? 8);
+    setParallaxLayers(item.metadata.parallaxLayers);
+    setOpenItem(item);
+    setSaveStatus('idle');
     setConfig((prev) => ({
       ...prev,
       type: item.type,
@@ -925,9 +944,7 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
       animationMode: item.metadata.animationMode || prev.animationMode,
       poseNotes: item.metadata.poseNotes || prev.poseNotes,
     }));
-    if (item.metadata?.modelUsed) {
-      setLastUsedModel(item.metadata.modelUsed);
-    }
+    setLastUsedModel(item.metadata?.modelUsed || null);
     setActiveTab(item.type === 'animation' ? 'preview' : 'compare');
   };
 
@@ -938,15 +955,19 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
   };
 
   const handleDeleteLibraryItem = async (id: string) => {
-    await deleteLibraryItem(id);
-    setLibrary((prev) => prev.filter((i) => i.id !== id));
+    try {
+      await deleteLibraryItem(id);
+      updateLibrary((prev) => prev.filter((i) => i.id !== id));
+    } catch (err) {
+      reportStorageError("Couldn't delete library item", err);
+    }
   };
 
   const handleRenameLibraryItem = async (id: string, newName: string) => {
-    const updated = library.map((i) => (i.id === id ? { ...i, name: newName } : i));
-    setLibrary(updated);
-    const item = updated.find((i) => i.id === id);
-    if (item) await saveLibraryItem(item);
+    const item = libraryRef.current.find((i) => i.id === id);
+    if (!item) return;
+    if (openItem?.id === id) setCurrentAssetName(newName);
+    await persistItem({ ...item, name: newName });
   };
 
   const handleExportAll = async () => {
@@ -959,6 +980,18 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
     }
   };
 
+  const assetBar = (
+    <AssetNameBar
+      name={currentAssetName}
+      onRename={handleRenameOpenAsset}
+      onSaveToLibrary={handleManualSave}
+      saveStatus={saveStatus}
+      isInLibrary={isOpenItemInLibrary}
+      modelUsed={openItem?.metadata.modelUsed || lastUsedModel}
+      canSave={Boolean(openItem && cleanedImage)}
+    />
+  );
+
   return (
     <div className="min-h-screen bg-zinc-950 text-zinc-100 flex flex-col font-sans selection:bg-amber-500/30">
       {/* App Header */}
@@ -968,6 +1001,7 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
         onResetProfiles={handleResetProfiles}
         selectedModelId={config.selectedModel}
         lastUsedModelId={lastUsedModel}
+        models={models}
       />
 
       {/* Main 3-Column Studio Workspace */}
@@ -1011,6 +1045,7 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
                 onCreateProfile={handleCreateProfile}
                 onDuplicateProfile={handleDuplicateProfile}
                 onDeleteProfile={handleDeleteProfile}
+                onResetProfileToDefaults={handleResetProfileToDefaults}
               />
             ) : (
               <AssetConfigPanel
@@ -1021,6 +1056,8 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
                 activeProfile={activeProfile}
                 profiles={profiles}
                 onSelectProfile={handleSelectProfile}
+                models={models}
+                modelsSource={modelsSource}
               />
             )}
           </div>
@@ -1028,6 +1065,29 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
 
         {/* Center Main Stage */}
         <div className="flex-1 flex flex-col p-3 overflow-hidden bg-zinc-950">
+          {/* Library save error (always visible until dismissed) */}
+          {saveError && (
+            <div
+              data-testid="save-error-banner"
+              className="mb-3 p-3 bg-red-950/60 border border-red-500/60 rounded-lg flex items-start justify-between gap-3 text-xs text-red-200"
+            >
+              <div className="flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-red-400 shrink-0 mt-0.5" />
+                <div>
+                  <span className="font-semibold block mb-0.5">Library not saved</span>
+                  <span>{saveError}</span>
+                </div>
+              </div>
+              <button
+                onClick={() => setSaveError(null)}
+                className="p-1 text-red-300 hover:text-red-100 shrink-0"
+                title="Dismiss"
+              >
+                <X className="w-3.5 h-3.5" />
+              </button>
+            </div>
+          )}
+
           {/* Error Banner */}
           {error && (
             <div className="mb-3 p-3 bg-red-950/50 border border-red-500/50 rounded-lg flex items-start justify-between gap-3 text-xs text-red-200">
@@ -1039,13 +1099,6 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
                 </div>
               </div>
               <div className="flex items-center gap-2 shrink-0">
-                <button
-                  onClick={handleTrySampleGeneration}
-                  className="px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded border border-zinc-700 font-medium"
-                  title="Run pipeline with preloaded profile assets"
-                >
-                  Try Sample Asset
-                </button>
                 <button
                   onClick={() => handleGenerate()}
                   className="px-2.5 py-1 bg-red-500/20 hover:bg-red-500/30 text-red-300 rounded border border-red-500/40 font-medium"
@@ -1074,8 +1127,8 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
                 >
                   ← Back to Raw vs Cleaned Compare
                 </button>
-                <span className="text-xs font-mono text-zinc-400">{currentAssetName}</span>
               </div>
+              {assetBar}
               <AnimationPreview
                 frames={frames}
                 fps={fps}
@@ -1106,8 +1159,8 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
                 >
                   ← Back to Raw vs Cleaned Compare
                 </button>
-                <span className="text-xs font-mono text-zinc-400">{currentAssetName}</span>
               </div>
+              {assetBar}
               <BackgroundPreview
                 backgroundImage={cleanedImage || rawImage || ''}
                 width={config.frameWidth}
@@ -1133,8 +1186,9 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
               onSelectStrongerModel={handleSelectStrongerModel}
               onApproveAsReference={handleApproveAsReference}
               onSetAsAnchor={handleSetAsAnchor}
-              onSaveToLibrary={() => {}}
-              isSaved={isSavedToLibrary}
+              onSaveToLibrary={handleManualSave}
+              isSaved={isOpenItemInLibrary}
+              assetBar={assetBar}
               activeTab={activeTab}
               setActiveTab={setActiveTab}
               onOpenPixelEditor={(idx) => {
@@ -1155,6 +1209,43 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
         onDeleteItem={handleDeleteLibraryItem}
         onRenameItem={handleRenameLibraryItem}
       />
+
+      {/* Same-name dialog for new assets */}
+      {nameConflict && (
+        <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            data-testid="name-conflict-dialog"
+            className="bg-zinc-900 border border-zinc-700 rounded-lg p-4 w-full max-w-sm space-y-3 text-sm text-zinc-200"
+          >
+            <p>
+              An asset named <span className="font-mono text-amber-300">{nameConflict.name}</span> is already in
+              the library.
+            </p>
+            <div className="flex flex-col gap-2">
+              <button
+                onClick={() => nameConflict.resolve('replace')}
+                className="px-3 py-1.5 rounded bg-red-500/20 border border-red-500/40 text-red-200 hover:bg-red-500/30 text-xs font-medium"
+              >
+                Replace existing {nameConflict.name}
+              </button>
+              <button
+                onClick={() => nameConflict.resolve('version')}
+                className="px-3 py-1.5 rounded bg-amber-500 text-zinc-950 hover:bg-amber-400 text-xs font-semibold"
+              >
+                Save as new version ({nameConflict.versionName})
+              </button>
+              <button
+                onClick={() => nameConflict.resolve('cancel')}
+                className="px-3 py-1.5 rounded bg-zinc-800 border border-zinc-700 text-zinc-300 hover:bg-zinc-700 text-xs"
+              >
+                Don't save for now
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* Tiny Pixel Editor Modal */}
       {pixelEditorOpen && (

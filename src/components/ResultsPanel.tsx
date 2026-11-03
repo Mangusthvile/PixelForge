@@ -41,6 +41,7 @@ interface ResultsPanelProps {
   activeTab: 'compare' | 'preview' | 'editor';
   setActiveTab: (tab: 'compare' | 'preview' | 'editor') => void;
   onOpenPixelEditor: (frameIndex?: number) => void;
+  assetBar?: React.ReactNode;
 }
 
 export const ResultsPanel: React.FC<ResultsPanelProps> = ({
@@ -64,6 +65,7 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
   activeTab,
   setActiveTab,
   onOpenPixelEditor,
+  assetBar,
 }) => {
   const [zoomLevel, setZoomLevel] = useState<number>(4); // 1x, 2x, 4x, 8x
   const [showSettingsDrawer, setShowSettingsDrawer] = useState(false);
@@ -74,16 +76,14 @@ export const ResultsPanel: React.FC<ResultsPanelProps> = ({
         <div className="w-16 h-16 rounded-full bg-zinc-900 border border-zinc-800 flex items-center justify-center text-zinc-600 mb-3">
           <Sparkles className="w-8 h-8" />
         </div>
-        <h3 className="text-zinc-200 font-medium text-sm mb-1">Pixel Canvas Ready</h3>
-        <p className="text-xs text-zinc-500 max-w-md mb-4">
-          Select a Style Profile (or use the built-in Characters / Backgrounds), choose an asset type or preset, and click Generate to run the real-time canvas cleanup pipeline.
-        </p>
+        <p className="text-sm text-zinc-400">Generate something to see it here</p>
       </div>
     );
   }
 
   return (
     <div className="flex-1 flex flex-col bg-zinc-950/90 border border-zinc-800 rounded-lg overflow-hidden min-h-[500px]">
+      {assetBar}
       {/* Top Toolbar */}
       <div className="h-11 bg-zinc-900/90 border-b border-zinc-800 px-3 flex items-center justify-between gap-2 select-none shrink-0">
         {/* View Tabs */}

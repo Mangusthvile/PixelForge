@@ -91,3 +91,13 @@ export const PROP_PRESETS: PresetItem[] = [
     propItems: 'Claw hammer\nHand saw\nWooden plank pile\nBucket of iron nails\nToolbox with brass latch\nBrick stack with mortar trowel\nWooden ladder\nDraftsman drafting table',
   },
 ];
+
+/**
+ * Library name for an asset generated from a preset:
+ * anim_idle -> fig_idle, bg_forest -> bg_forest, prop_forest -> props_forest.
+ */
+export function getPresetAssetName(preset: PresetItem): string {
+  if (preset.id.startsWith('anim_')) return `fig_${preset.id.slice('anim_'.length)}`;
+  if (preset.id.startsWith('prop_')) return `props_${preset.id.slice('prop_'.length)}`;
+  return preset.id;
+}

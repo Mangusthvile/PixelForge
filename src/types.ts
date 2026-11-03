@@ -25,46 +25,16 @@ export interface StyleProfile {
   isBuiltIn?: boolean;
 }
 
+/** An image-capable model as reported by the server's /api/models (real Gemini model ids). */
 export interface ImageModelOption {
   id: string;
   name: string;
-  badge: string;
-  description: string;
-  isDefault?: boolean;
+  description?: string;
 }
 
-export const AVAILABLE_IMAGE_MODELS: ImageModelOption[] = [
-  {
-    id: 'gemini-3-pro-image',
-    name: 'Gemini 3 Pro Image',
-    badge: 'Pro Quality (Default)',
-    description: 'Highest visual fidelity, exact adherence to pixel art references and proportions',
-    isDefault: true,
-  },
-  {
-    id: 'gemini-nano-banana-2.1',
-    name: 'Gemini Nano Banana 2.1',
-    badge: 'High-Res / 2K',
-    description: 'High-quality generation with expanded aspect ratio support and crisp edges',
-  },
-  {
-    id: 'gemini-3.1-flash-lite-image',
-    name: 'Gemini 3.1 Flash Lite Image',
-    badge: 'Fast Lite',
-    description: 'High throughput, fast draft generations and rapid iteration',
-  },
-];
-
-export function getModelOption(modelId?: string): ImageModelOption {
-  if (!modelId) return AVAILABLE_IMAGE_MODELS[0];
-  const found = AVAILABLE_IMAGE_MODELS.find((m) => m.id === modelId);
-  if (found) return found;
-  return {
-    id: modelId,
-    name: modelId,
-    badge: 'Custom',
-    description: `Target model: ${modelId}`,
-  };
+export function getModelOption(models: ImageModelOption[], modelId?: string | null): ImageModelOption | null {
+  if (!modelId) return null;
+  return models.find((m) => m.id === modelId) || { id: modelId, name: modelId };
 }
 
 export interface GenerationConfig {
@@ -84,6 +54,9 @@ export interface GenerationConfig {
   animationMode: AnimationMode; // 'template' (default) or 'frame_by_frame'
   selectedModel: string;
   poseNotes: string[];
+  // Set when a preset is applied; the asset is named after the preset while the description is unchanged.
+  presetAssetName?: string;
+  presetDescription?: string;
 }
 
 export interface CleanupSettings {

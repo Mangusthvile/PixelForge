@@ -1,5 +1,8 @@
 import { StyleProfile, LibraryItem } from '../types';
 
+// Library items and style profiles live in IndexedDB only.
+// localStorage is reserved for small settings (e.g. the selected model id).
+
 const DB_NAME = 'pixelforge_db';
 const DB_VERSION = 2;
 const STORE_PROFILES = 'style_profiles';
@@ -9,41 +12,24 @@ export const INITIAL_CHARACTERS_PROFILE: StyleProfile = {
   id: 'profile_characters',
   name: 'Characters',
   description:
-    'tiny chibi figures in 24x24 pixel cell for standing poses (32x24 cell for swinging tools/weapons). Plain white/cream body, round head, two small dot eyes, dark brown 1-pixel outline, no clothes or hair unless asked. Hard square pixels, no anti-aliasing, no blur, no gradients, small palette.',
+    'tiny chibi figures in 24x24 pixel cell for standing poses (32x24 cell for swinging tools/weapons). Plain white/cream body, round head, dark brown 1-pixel outline, no clothes or hair unless asked. Side view facing right unless asked otherwise. No blush, no cheek color, no mouth. Face is only two small dot eyes. Hard square pixels, no anti-aliasing, no blur, no gradients, small palette.',
   frameWidth: 24,
   frameHeight: 24,
-  outlineColor: '#3d251e',
+  outlineColor: '#2f2522',
   isBuiltIn: true,
-  anchorId: 'ref_char_anchor_single',
-  palette: [
-    '#ffffff',
-    '#faf3e8',
-    '#f4ede2',
-    '#e5ded3',
-    '#d6ccc2',
-    '#f28482',
-    '#e07a5f',
-    '#81b29a',
-    '#3d251e',
-    '#251612',
-    '#000000',
-  ],
+  anchorId: 'ref_char_anchor_noblush',
+  palette: ['#faf3e8', '#2f2522', '#b9b3a1', '#e7d5c6'],
   references: [
     {
-      id: 'ref_char_anchor_single',
-      label: 'Right-Facing Figure Anchor (8x on Magenta)',
-      url: '/assets/anchor_figure_right_facing.png',
+      id: 'ref_char_anchor_noblush',
+      label: 'Right-Facing Anchor (8x on Magenta, no blush)',
+      url: '/assets/anchor_right_x8_magenta_noblush.png',
       isAnchor: true,
     },
     {
-      id: 'ref_char_front_single',
-      label: 'Front-Facing Figure (8x on Magenta)',
-      url: '/assets/reference_character_front_192.png',
-    },
-    {
-      id: 'ref_char_walk_row',
-      label: 'Single Row Walk Reference (Magenta)',
-      url: '/assets/reference_character_walk_row_magenta.png',
+      id: 'ref_char_walk_row_noblush',
+      label: 'Walk Row Style Reference (8x on Magenta, no blush)',
+      url: '/assets/walk_row_x8_magenta_noblush.png',
     },
   ],
 };
@@ -97,17 +83,24 @@ export const INITIAL_BACKGROUNDS_PROFILE: StyleProfile = {
   ],
 };
 
-// Open IndexedDB instance
+export const DEFAULT_PROFILES: StyleProfile[] = [INITIAL_CHARACTERS_PROFILE, INITIAL_BACKGROUNDS_PROFILE];
+
+export function getDefaultProfile(id: string): StyleProfile | undefined {
+  return DEFAULT_PROFILES.find((p) => p.id === id);
+}
+
+let dbPromise: Promise<IDBDatabase> | null = null;
+
 function openDB(): Promise<IDBDatabase> {
-  return new Promise((resolve, reject) => {
+  if (dbPromise) return dbPromise;
+  const opening = new Promise<IDBDatabase>((resolve, reject) => {
     if (typeof window === 'undefined' || !window.indexedDB) {
-      return reject(new Error('IndexedDB not supported'));
+      reject(new Error('IndexedDB is not supported in this browser.'));
+      return;
     }
-
     const request = window.indexedDB.open(DB_NAME, DB_VERSION);
-
-    request.onupgradeneeded = (event: any) => {
-      const db = event.target.result as IDBDatabase;
+    request.onupgradeneeded = () => {
+      const db = request.result;
       if (!db.objectStoreNames.contains(STORE_PROFILES)) {
         db.createObjectStore(STORE_PROFILES, { keyPath: 'id' });
       }
@@ -115,263 +108,173 @@ function openDB(): Promise<IDBDatabase> {
         db.createObjectStore(STORE_LIBRARY, { keyPath: 'id' });
       }
     };
-
     request.onsuccess = () => resolve(request.result);
-    request.onerror = () => reject(request.error);
+    request.onerror = () => reject(request.error || new Error('Failed to open IndexedDB.'));
+    request.onblocked = () => reject(new Error('IndexedDB open was blocked by another tab.'));
+  });
+  // Allow a retry on the next call if opening failed.
+  opening.catch(() => {
+    dbPromise = null;
+  });
+  dbPromise = opening;
+  return opening;
+}
+
+/** Run a write transaction and resolve only once it has actually committed. */
+async function writeTx(storeName: string, work: (store: IDBObjectStore) => void): Promise<void> {
+  const db = await openDB();
+  return new Promise<void>((resolve, reject) => {
+    let tx: IDBTransaction;
+    try {
+      tx = db.transaction(storeName, 'readwrite');
+      work(tx.objectStore(storeName));
+    } catch (err) {
+      reject(err);
+      return;
+    }
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error || new Error(`IndexedDB write to ${storeName} failed.`));
+    tx.onabort = () => reject(tx.error || new Error(`IndexedDB write to ${storeName} was aborted.`));
   });
 }
 
-// Style Profiles Storage
-export async function getStoredProfiles(): Promise<StyleProfile[]> {
+async function readAll<T>(storeName: string): Promise<T[]> {
+  const db = await openDB();
+  return new Promise<T[]>((resolve, reject) => {
+    const tx = db.transaction(storeName, 'readonly');
+    const req = tx.objectStore(storeName).getAll();
+    req.onsuccess = () => resolve((req.result as T[]) || []);
+    req.onerror = () => reject(req.error || new Error(`IndexedDB read from ${storeName} failed.`));
+  });
+}
+
+// ---------------------------------------------------------------------------
+// One-time startup maintenance
+// ---------------------------------------------------------------------------
+
+const SEED_ITEM_IDS = ['item_seed_idle', 'item_seed_bg'];
+const MAINTENANCE_FLAG = 'pixelforge_storage_cleanup_v1';
+const LEGACY_LIBRARY_KEY = 'pixelforge_library';
+const LEGACY_PROFILES_KEY = 'pixelforge_profiles';
+
+function parseLegacyArray<T>(key: string): T[] {
   try {
-    const db = await openDB();
-    return new Promise((resolve) => {
-      const tx = db.transaction(STORE_PROFILES, 'readonly');
-      const store = tx.objectStore(STORE_PROFILES);
-      const req = store.getAll();
-
-      req.onsuccess = () => {
-        let list: StyleProfile[] = req.result || [];
-        if (!list || list.length === 0) {
-          // Initialize with default profiles
-          list = [INITIAL_CHARACTERS_PROFILE, INITIAL_BACKGROUNDS_PROFILE];
-          saveAllProfiles(list);
-        } else {
-          // Ensure built-in Characters profile has the latest 24x24 single-figure anchor
-          let migrated = false;
-          list = list.map((p) => {
-            if (
-              p.id === 'profile_characters' &&
-              (p.frameWidth === 16 || !p.references.some((r) => r.id === 'ref_char_anchor_single'))
-            ) {
-              migrated = true;
-              return {
-                ...p,
-                frameWidth: 24,
-                frameHeight: 24,
-                description: INITIAL_CHARACTERS_PROFILE.description,
-                anchorId: INITIAL_CHARACTERS_PROFILE.anchorId,
-                references: INITIAL_CHARACTERS_PROFILE.references,
-              };
-            }
-            return p;
-          });
-          if (migrated) {
-            saveAllProfiles(list);
-          }
-        }
-        resolve(list);
-      };
-
-      req.onerror = () => {
-        resolve([INITIAL_CHARACTERS_PROFILE, INITIAL_BACKGROUNDS_PROFILE]);
-      };
-    });
-  } catch (err) {
-    console.warn('Falling back to localStorage for profiles:', err);
-    const local = localStorage.getItem('pixelforge_profiles');
-    if (local) {
-      try {
-        return JSON.parse(local);
-      } catch (e) {
-        // ignore
-      }
-    }
-    return [INITIAL_CHARACTERS_PROFILE, INITIAL_BACKGROUNDS_PROFILE];
+    const raw = localStorage.getItem(key);
+    const parsed = raw ? JSON.parse(raw) : [];
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
   }
+}
+
+/**
+ * Runs once per browser:
+ *  - deletes the old fake starter items (item_seed_idle, item_seed_bg)
+ *  - moves items/profiles that only existed in the old localStorage fallback into IndexedDB
+ *  - removes the old localStorage copies (they held full image data URLs and hit the quota)
+ */
+export async function runStartupMaintenance(): Promise<void> {
+  if (typeof window === 'undefined') return;
+  if (localStorage.getItem(MAINTENANCE_FLAG)) return;
+
+  const legacyItems = parseLegacyArray<LibraryItem>(LEGACY_LIBRARY_KEY).filter(
+    (i) => i && i.id && !SEED_ITEM_IDS.includes(i.id)
+  );
+  const legacyProfiles = parseLegacyArray<StyleProfile>(LEGACY_PROFILES_KEY).filter((p) => p && p.id);
+
+  const existingItemIds = new Set((await readAll<LibraryItem>(STORE_LIBRARY)).map((i) => i.id));
+  const existingProfileIds = new Set((await readAll<StyleProfile>(STORE_PROFILES)).map((p) => p.id));
+
+  await writeTx(STORE_LIBRARY, (store) => {
+    for (const id of SEED_ITEM_IDS) store.delete(id);
+    for (const item of legacyItems) {
+      if (!existingItemIds.has(item.id)) store.put(item);
+    }
+  });
+
+  const profilesToImport = legacyProfiles.filter((p) => !existingProfileIds.has(p.id));
+  if (profilesToImport.length > 0) {
+    await writeTx(STORE_PROFILES, (store) => {
+      for (const p of profilesToImport) store.put(p);
+    });
+  }
+
+  localStorage.removeItem(LEGACY_LIBRARY_KEY);
+  localStorage.removeItem(LEGACY_PROFILES_KEY);
+  localStorage.setItem(MAINTENANCE_FLAG, new Date().toISOString());
+}
+
+// ---------------------------------------------------------------------------
+// Style profiles
+// ---------------------------------------------------------------------------
+
+/**
+ * Loads saved profiles. Built-in defaults are only added when missing,
+ * so a saved Characters profile is never overwritten.
+ */
+export async function getStoredProfiles(): Promise<StyleProfile[]> {
+  const stored = await readAll<StyleProfile>(STORE_PROFILES);
+  const list = [...stored];
+  const missing: StyleProfile[] = [];
+
+  if (!list.some((p) => p.id === INITIAL_CHARACTERS_PROFILE.id)) {
+    missing.push(INITIAL_CHARACTERS_PROFILE);
+  }
+  if (stored.length === 0) {
+    missing.push(INITIAL_BACKGROUNDS_PROFILE);
+  }
+
+  if (missing.length > 0) {
+    await writeTx(STORE_PROFILES, (store) => {
+      for (const p of missing) store.put(p);
+    });
+    list.push(...missing);
+  }
+
+  // Built-ins first in their default order, then custom profiles.
+  const order = (p: StyleProfile) => {
+    const idx = DEFAULT_PROFILES.findIndex((d) => d.id === p.id);
+    return idx === -1 ? DEFAULT_PROFILES.length : idx;
+  };
+  return list.sort((a, b) => order(a) - order(b));
 }
 
 export async function saveProfile(profile: StyleProfile): Promise<void> {
-  try {
-    const db = await openDB();
-    const tx = db.transaction(STORE_PROFILES, 'readwrite');
-    const store = tx.objectStore(STORE_PROFILES);
+  await writeTx(STORE_PROFILES, (store) => {
     store.put(profile);
-  } catch (err) {
-    console.warn('IndexedDB saveProfile failed, saving to localStorage:', err);
-  }
-
-  // Backup to localStorage
-  const current = await getStoredProfiles();
-  const index = current.findIndex((p) => p.id === profile.id);
-  if (index >= 0) {
-    current[index] = profile;
-  } else {
-    current.push(profile);
-  }
-  localStorage.setItem('pixelforge_profiles', JSON.stringify(current));
+  });
 }
 
 export async function saveAllProfiles(profiles: StyleProfile[]): Promise<void> {
-  try {
-    const db = await openDB();
-    const tx = db.transaction(STORE_PROFILES, 'readwrite');
-    const store = tx.objectStore(STORE_PROFILES);
+  await writeTx(STORE_PROFILES, (store) => {
     store.clear();
-    for (const p of profiles) {
-      store.put(p);
-    }
-  } catch (e) {
-    // ignore
-  }
-  localStorage.setItem('pixelforge_profiles', JSON.stringify(profiles));
+    for (const p of profiles) store.put(p);
+  });
 }
 
 export async function deleteProfileFromDB(profileId: string): Promise<void> {
-  try {
-    const db = await openDB();
-    const tx = db.transaction(STORE_PROFILES, 'readwrite');
-    const store = tx.objectStore(STORE_PROFILES);
+  await writeTx(STORE_PROFILES, (store) => {
     store.delete(profileId);
-  } catch (e) {
-    // ignore
-  }
-
-  const current = await getStoredProfiles();
-  const filtered = current.filter((p) => p.id !== profileId);
-  localStorage.setItem('pixelforge_profiles', JSON.stringify(filtered));
+  });
 }
 
-export const STARTER_LIBRARY_ITEMS: LibraryItem[] = [
-  {
-    id: 'item_seed_idle',
-    name: 'fig_idle',
-    type: 'animation',
-    profileId: 'profile_characters',
-    profileName: 'Characters',
-    prompt: 'chibi character idle stance 4 frames',
-    referencesUsed: ['Base Idle Character (Anchor)'],
-    createdAt: new Date(Date.now() - 3600000).toISOString(),
-    rawImage: '/assets/aistudio/16x16_Idle-Sheet_00a11b4c.png',
-    cleanedImage: '/assets/aistudio/16x16_Idle-Sheet_00a11b4c.png',
-    frames: [
-      '/assets/aistudio/16x16_Idle-Sheet_00a11b4c.png',
-      '/assets/aistudio/16x16_Idle-Sheet_00a11b4c.png',
-      '/assets/aistudio/16x16_Idle-Sheet_00a11b4c.png',
-      '/assets/aistudio/16x16_Idle-Sheet_00a11b4c.png',
-    ],
-    metadata: {
-      frameWidth: 16,
-      frameHeight: 24,
-      frameCount: 4,
-      fps: 8,
-      baselineY: 22,
-      facing: 'right',
-    },
-  },
-  {
-    id: 'item_seed_bg',
-    name: 'bg_pine_hills',
-    type: 'background',
-    profileId: 'profile_backgrounds',
-    profileName: 'Backgrounds',
-    prompt: 'rolling pine hills with layered atmospheric perspective',
-    referencesUsed: ['Rolling Pine Hills (Anchor)'],
-    createdAt: new Date().toISOString(),
-    rawImage: '/assets/aistudio/image_e2a4566b.png',
-    cleanedImage: '/assets/aistudio/image_e2a4566b.png',
-    frames: ['/assets/aistudio/image_e2a4566b.png'],
-    metadata: {
-      frameWidth: 320,
-      frameHeight: 64,
-      frameCount: 1,
-      fps: 0,
-      baselineY: 0,
-      tiling: true,
-    },
-  },
-];
+// ---------------------------------------------------------------------------
+// Library items
+// ---------------------------------------------------------------------------
 
-// Library Items Storage
 export async function getStoredLibrary(): Promise<LibraryItem[]> {
-  try {
-    const db = await openDB();
-    return new Promise((resolve) => {
-      const tx = db.transaction(STORE_LIBRARY, 'readonly');
-      const store = tx.objectStore(STORE_LIBRARY);
-      const req = store.getAll();
-
-      req.onsuccess = () => {
-        let list: LibraryItem[] = req.result || [];
-        if (!list || list.length === 0) {
-          list = getFallbackLibrary();
-        }
-        if (!list || list.length === 0) {
-          list = STARTER_LIBRARY_ITEMS;
-          saveAllLibraryItems(list);
-        }
-        resolve(list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime()));
-      };
-
-      req.onerror = () => {
-        const fallback = getFallbackLibrary();
-        resolve(fallback.length > 0 ? fallback : STARTER_LIBRARY_ITEMS);
-      };
-    });
-  } catch (err) {
-    const fallback = getFallbackLibrary();
-    return fallback.length > 0 ? fallback : STARTER_LIBRARY_ITEMS;
-  }
-}
-
-function getFallbackLibrary(): LibraryItem[] {
-  const local = localStorage.getItem('pixelforge_library');
-  if (local) {
-    try {
-      const parsed = JSON.parse(local);
-      if (Array.isArray(parsed) && parsed.length > 0) return parsed;
-    } catch (e) {
-      // ignore
-    }
-  }
-  return [];
-}
-
-export async function saveAllLibraryItems(items: LibraryItem[]): Promise<void> {
-  try {
-    const db = await openDB();
-    const tx = db.transaction(STORE_LIBRARY, 'readwrite');
-    const store = tx.objectStore(STORE_LIBRARY);
-    for (const item of items) {
-      store.put(item);
-    }
-  } catch (err) {
-    // ignore
-  }
-  localStorage.setItem('pixelforge_library', JSON.stringify(items));
+  const list = await readAll<LibraryItem>(STORE_LIBRARY);
+  return list.sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
 }
 
 export async function saveLibraryItem(item: LibraryItem): Promise<void> {
-  try {
-    const db = await openDB();
-    const tx = db.transaction(STORE_LIBRARY, 'readwrite');
-    const store = tx.objectStore(STORE_LIBRARY);
+  await writeTx(STORE_LIBRARY, (store) => {
     store.put(item);
-  } catch (err) {
-    console.warn('IndexedDB saveLibraryItem failed:', err);
-  }
-
-  const current = getFallbackLibrary();
-  const index = current.findIndex((i) => i.id === item.id);
-  if (index >= 0) {
-    current[index] = item;
-  } else {
-    current.unshift(item);
-  }
-  localStorage.setItem('pixelforge_library', JSON.stringify(current));
+  });
 }
 
 export async function deleteLibraryItem(id: string): Promise<void> {
-  try {
-    const db = await openDB();
-    const tx = db.transaction(STORE_LIBRARY, 'readwrite');
-    const store = tx.objectStore(STORE_LIBRARY);
+  await writeTx(STORE_LIBRARY, (store) => {
     store.delete(id);
-  } catch (err) {
-    // ignore
-  }
-
-  const current = await getStoredLibrary();
-  const filtered = current.filter((i) => i.id !== id);
-  localStorage.setItem('pixelforge_library', JSON.stringify(filtered));
+  });
 }

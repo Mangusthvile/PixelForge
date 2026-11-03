@@ -273,31 +273,44 @@ test('Template Fill Mode builds the exact required prompt instruction', async ()
   assert.equal(built.gridRows, 2);
 });
 
-test('getModelOption correctly resolves Gemini image models and badges', async () => {
+test('getModelOption resolves ids against the live model list', async () => {
   const { getModelOption } = await import('../types.ts');
+  const models = [
+    { id: 'gemini-3-pro-image-preview', name: 'Nano Banana Pro' },
+    { id: 'gemini-2.5-flash-image', name: 'Nano Banana' },
+  ];
 
-  // Default / undefined returns Gemini 3 Pro Image (highest quality default)
-  const defaultModel = getModelOption();
-  assert.equal(defaultModel.id, 'gemini-3-pro-image');
-  assert.equal(defaultModel.name, 'Gemini 3 Pro Image');
-  assert.match(defaultModel.badge, /Pro Quality/);
+  assert.equal(getModelOption(models), null);
+  assert.equal(getModelOption(models, 'gemini-3-pro-image-preview')?.name, 'Nano Banana Pro');
 
-  // Gemini 3 Pro Image explicitly
-  const proModel = getModelOption('gemini-3-pro-image');
-  assert.equal(proModel.name, 'Gemini 3 Pro Image');
+  // Unknown ids (e.g. an old saved selection) are shown as-is
+  const custom = getModelOption(models, 'custom-experimental-model');
+  assert.equal(custom?.id, 'custom-experimental-model');
+  assert.equal(custom?.name, 'custom-experimental-model');
+});
 
-  // Gemini 3.1 Flash-Lite
-  const flashModel = getModelOption('gemini-3.1-flash-lite-image');
-  assert.equal(flashModel.name, 'Gemini 3.1 Flash Lite Image');
-  assert.match(flashModel.badge, /Fast Lite/);
+test('preset asset names follow the preset (fig_idle, fig_walk, bg_forest)', async () => {
+  const { ANIMATION_PRESETS, BACKGROUND_PRESETS, getPresetAssetName } = await import('./presets.ts');
+  const byId = (id: string) => [...ANIMATION_PRESETS, ...BACKGROUND_PRESETS].find((p) => p.id === id)!;
+  assert.equal(getPresetAssetName(byId('anim_idle')), 'fig_idle');
+  assert.equal(getPresetAssetName(byId('anim_walk')), 'fig_walk');
+  assert.equal(getPresetAssetName(byId('bg_forest')), 'bg_forest');
+});
 
-  // Gemini Nano Banana 2.1
-  const nanoModel = getModelOption('gemini-nano-banana-2.1');
-  assert.equal(nanoModel.name, 'Gemini Nano Banana 2.1');
-  assert.match(nanoModel.badge, /High-Res/);
+test('nextVersionName picks the next free _vN suffix', async () => {
+  const { nextVersionName } = await import('./naming.ts');
+  assert.equal(nextVersionName('fig_idle', [{ name: 'fig_idle' }]), 'fig_idle_v2');
+  assert.equal(
+    nextVersionName('fig_idle', [{ name: 'fig_idle' }, { name: 'fig_idle_v2' }, { name: 'fig_idle_v3' }]),
+    'fig_idle_v4'
+  );
+  assert.equal(nextVersionName('fig_idle_v2', [{ name: 'fig_idle_v2' }]), 'fig_idle_v3');
+});
 
-  // Custom / fallback model
-  const customModel = getModelOption('custom-experimental-model');
-  assert.equal(customModel.id, 'custom-experimental-model');
-  assert.equal(customModel.name, 'custom-experimental-model');
+test('resolveAssetName uses the preset name only while the preset description is unchanged', async () => {
+  const { resolveAssetName } = await import('./naming.ts');
+  const base: any = { presetAssetName: 'fig_idle', presetDescription: 'idle stance', description: 'idle stance' };
+  assert.equal(resolveAssetName(base, 'fig_idle_stance'), 'fig_idle');
+  assert.equal(resolveAssetName({ ...base, description: 'something else' }, 'fig_something_else'), 'fig_something_else');
+  assert.equal(resolveAssetName(base, 'bg_idle_stance'), 'bg_idle_stance');
 });
