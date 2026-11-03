@@ -21,10 +21,14 @@ import {
   INITIAL_CHARACTERS_PROFILE,
   INITIAL_BACKGROUNDS_PROFILE,
 } from './utils/storage';
-import { runCleanupPipeline } from './utils/canvasPipeline';
+import { runCleanupPipeline, GridCheck } from './utils/canvasPipeline';
 import { buildGenerationPrompt } from './utils/promptBuilder';
 import {
   buildGridTemplateImage,
+  computeTemplateLayout,
+  getBestAspectRatio,
+  syncPoseNotes,
+  validatePoseNotes,
   getGridDimensions,
   generatePoseNotes,
   detectCopyOfFrames,
@@ -92,7 +96,7 @@ export default function App() {
 
   // Every config change goes through withAutoName so the Name field follows presets /
   // suggestions until the user types their own name.
-  const changeConfig = (next: GenerationConfig) => setConfig(withAutoName(next));
+  const changeConfig = (next: GenerationConfig) => setConfig(normalizeConfig(next));
 
   // Cleanup Settings
   const [settings, setSettings] = useState<CleanupSettings>({
@@ -114,6 +118,9 @@ export default function App() {
   const [frames, setFrames] = useState<string[]>([]);
   const [detectedScale, setDetectedScale] = useState<number>(1);
   const [computedScale, setComputedScale] = useState<number | undefined>();
+  // Template Fill result whose detected grid doesn't match the requested one. The asset is
+  // held (not sliced, not saved) until the user picks "slice using detected grid" or regenerates.
+  const [gridIssue, setGridIssue] = useState<{ check: GridCheck; pendingItem: LibraryItem } | null>(null);
   const [frameWarning, setFrameWarning] = useState<string | undefined>();
   const [copyWarning, setCopyWarning] = useState<string | undefined>();
   const [baselineY, setBaselineY] = useState<number>(-1);
@@ -368,7 +375,7 @@ export default function App() {
   const handleSelectProfile = (p: StyleProfile) => {
     setActiveProfile(p);
     if (p.name.toLowerCase().includes('background')) {
-      setConfig((prev) => withAutoName({
+      setConfig((prev) => normalizeConfig({
         ...prev,
         type: 'background',
         description: 'dense alpine evergreen pines, misty blue distant peaks',
@@ -379,7 +386,7 @@ export default function App() {
       }));
     } else {
       const actionDesc = 'walk cycle continuous 6 frames swinging arms and stepping legs';
-      setConfig((prev) => withAutoName({
+      setConfig((prev) => normalizeConfig({
         ...prev,
         type: 'animation',
         description: actionDesc,
@@ -489,6 +496,16 @@ export default function App() {
   // MAIN GENERATION FLOW
   const handleGenerate = async (overrideConfig?: Partial<GenerationConfig>) => {
     const currentConfig = { ...config, ...(overrideConfig || {}) };
+    if (currentConfig.type === 'animation') {
+      const notesError = validatePoseNotes(currentConfig.poseNotes, currentConfig.frameCount);
+      if (notesError) {
+        setError(notesError);
+        return;
+      }
+    }
+    setGridIssue(null);
+    const genSettings: CleanupSettings = { ...settings, gridSource: undefined };
+    if (settings.gridSource) setSettings(genSettings);
     // The new asset's name comes only from the config's Name field, never from the open asset.
     const newAssetName = generationAssetName(currentConfig);
     setCurrentAssetName(newAssetName);
@@ -665,12 +682,20 @@ export default function App() {
       if (currentConfig.type === 'animation' && currentConfig.animationMode === 'template') {
         setGenerationProgressText('Building 8x grid template with Anchor in Cell 1...');
         const gridDims = getGridDimensions(currentConfig.frameCount);
-        templateImageBase64 = await buildGridTemplateImage(
-          anchorBase64,
+        // Exactly the aspect ratio we ask the model for, with the cell block centered.
+        const layout = computeTemplateLayout(
           gridDims.cols,
           gridDims.rows,
           currentConfig.frameWidth,
           currentConfig.frameHeight,
+          getBestAspectRatio(gridDims.cols, gridDims.rows, currentConfig.frameWidth, currentConfig.frameHeight)
+        );
+        templateImageBase64 = await buildGridTemplateImage(
+          anchorBase64,
+          layout,
+          currentConfig.frameWidth,
+          currentConfig.frameHeight,
+          currentConfig.frameCount,
           settings.baselineY >= 0 ? settings.baselineY : undefined
         );
       }
@@ -711,7 +736,7 @@ export default function App() {
 
       // 4. Run Cleanup Pipeline with reading order grid slicing
       const pipelineRes = await rerunPipeline(generatedDataUrl, {
-        ...settings,
+        ...genSettings,
         gridCols: builtPrompt.gridCols,
         gridRows: builtPrompt.gridRows,
       });
@@ -748,6 +773,12 @@ export default function App() {
             poseNotes: currentConfig.poseNotes,
           },
         };
+        if (pipelineRes.gridCheck?.blocked) {
+          // The model drew a different grid: don't slice or save until the user decides.
+          setGridIssue({ check: pipelineRes.gridCheck, pendingItem: newItem });
+          setActiveTab('compare');
+          return;
+        }
         await openAndSaveNewItem(newItem);
       }
     } catch (err: any) {
@@ -757,6 +788,26 @@ export default function App() {
       setIsGenerating(false);
       setGenerationProgressText('');
     }
+  };
+
+  // Grid mismatch: slice with the grid the model actually drew, then save
+  const handleSliceWithDetectedGrid = async () => {
+    if (!gridIssue || !rawImage) return;
+    const { pendingItem } = gridIssue;
+    const detectedSettings: CleanupSettings = { ...settings, gridSource: 'detected' };
+    setSettings(detectedSettings);
+    const res = await rerunPipeline(rawImage, detectedSettings);
+    if (!res || res.frames.length === 0) {
+      setError('No figures were found to slice in the detected grid. Try regenerating.');
+      return;
+    }
+    setGridIssue(null);
+    await openAndSaveNewItem({
+      ...pendingItem,
+      cleanedImage: res.cleanedDataUrl,
+      frames: res.frames,
+      metadata: { ...pendingItem.metadata, frameCount: res.frames.length, baselineY: res.baselineY },
+    });
   };
 
   // Switch to Frame by Frame handler (from copy warning banner)
@@ -966,7 +1017,9 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
     setOpenItem(item);
     setSaveStatus('idle');
     setComputedScale(undefined);
-    setConfig((prev) => withAutoName({
+    setGridIssue(null);
+    if (settings.gridSource) setSettings({ ...settings, gridSource: undefined });
+    setConfig((prev) => normalizeConfig({
       ...prev,
       type: item.type,
       frameWidth: item.metadata.frameWidth,
@@ -1188,6 +1241,41 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
               >
                 <X className="w-3.5 h-3.5" />
               </button>
+            </div>
+          )}
+
+          {/* Grid mismatch (Template Fill) */}
+          {gridIssue && (
+            <div
+              data-testid="grid-mismatch-banner"
+              className="mb-3 p-3 bg-amber-500/15 border border-amber-500/50 rounded-lg flex flex-col sm:flex-row items-start sm:items-center justify-between gap-3 text-xs text-amber-200"
+            >
+              <div className="flex items-start gap-2">
+                <AlertCircle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                <div>
+                  <span className="font-semibold block mb-0.5">
+                    Model drew a {gridIssue.check.detected.cols}x{gridIssue.check.detected.rows} grid instead of{' '}
+                    {gridIssue.check.requested.cols}x{gridIssue.check.requested.rows}
+                  </span>
+                  <span>Nothing has been sliced or saved yet.</span>
+                </div>
+              </div>
+              <div className="flex items-center gap-2 shrink-0">
+                <button
+                  onClick={handleSliceWithDetectedGrid}
+                  disabled={isGenerating}
+                  className="px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-100 rounded border border-zinc-700 font-medium disabled:opacity-50"
+                >
+                  Slice using detected grid
+                </button>
+                <button
+                  onClick={() => handleGenerate()}
+                  disabled={isGenerating}
+                  className="px-2.5 py-1 bg-amber-500 hover:bg-amber-400 text-zinc-950 rounded font-semibold disabled:opacity-50"
+                >
+                  Regenerate
+                </button>
+              </div>
             </div>
           )}
 
@@ -1473,4 +1561,13 @@ async function decodeGifFrames(dataUrl: string): Promise<{ frames: string[]; fps
     console.warn('Could not decode GIF frames; importing the first frame only.', err);
     return null;
   }
+}
+
+/** Auto name + pose notes always matching the frame count (one unique note per frame). */
+function normalizeConfig(cfg: GenerationConfig): GenerationConfig {
+  const named = withAutoName(cfg);
+  if (named.type !== 'animation') return named;
+  const notes = named.poseNotes || [];
+  if (notes.length === named.frameCount) return named;
+  return { ...named, poseNotes: syncPoseNotes(notes, named.frameCount, named.description) };
 }

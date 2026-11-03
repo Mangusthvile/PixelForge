@@ -35,6 +35,8 @@ import {
   getGridDimensions,
   getBestAspectRatio,
   generatePoseNotes,
+  syncPoseNotes,
+  validatePoseNotes,
 } from '../utils/gridLayout';
 
 interface AssetConfigPanelProps {
@@ -234,6 +236,8 @@ export const AssetConfigPanel: React.FC<AssetConfigPanelProps> = ({
   };
 
   const gridDims = getGridDimensions(config.frameCount || 6);
+  const poseNotesError =
+    config.type === 'animation' ? validatePoseNotes(config.poseNotes || [], config.frameCount) : null;
   const bestAspect = getBestAspectRatio(gridDims.cols, gridDims.rows, config.frameWidth, config.frameHeight);
   const currentModel = models.find((m) => m.id === config.selectedModel) || null;
 
@@ -524,7 +528,8 @@ export const AssetConfigPanel: React.FC<AssetConfigPanelProps> = ({
                 value={config.frameCount}
                 onChange={(e) => {
                   const cnt = Math.max(2, Math.min(12, parseInt(e.target.value, 10) || 4));
-                  const notes = generatePoseNotes(config.description, cnt);
+                  // Keep existing notes; add/remove to match and renumber "frame N of M".
+                  const notes = syncPoseNotes(config.poseNotes || [], cnt, config.description);
                   onChangeConfig({
                     ...config,
                     frameCount: cnt,
@@ -893,10 +898,15 @@ export const AssetConfigPanel: React.FC<AssetConfigPanelProps> = ({
       </div>
 
       {/* Main Generate Button */}
-      <div className="pt-2">
+      <div className="pt-2 space-y-1.5">
+        {poseNotesError && (
+          <p data-testid="pose-notes-error" className="text-[11px] text-red-400 leading-snug">
+            {poseNotesError}
+          </p>
+        )}
         <button
           onClick={onGenerate}
-          disabled={isGenerating}
+          disabled={isGenerating || !!poseNotesError}
           className="w-full py-2.5 px-4 rounded-md font-semibold text-xs tracking-wide uppercase transition flex items-center justify-center gap-2 bg-gradient-to-r from-amber-500 to-amber-600 hover:from-amber-400 hover:to-amber-500 text-zinc-950 font-bold shadow-lg shadow-amber-500/20 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           {isGenerating ? (

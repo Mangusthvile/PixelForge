@@ -411,3 +411,112 @@ test('block-majority downscale ignores a half-pixel offset', async () => {
   t.set([10, 20, 30, 0, 99, 99, 99, 0, 1, 2, 3, 0, 255, 255, 255, 255]);
   assert.deepEqual(Array.from(downscaleBlockModeData(t, 2, 2, 1, 1)), [0, 0, 0, 0]);
 });
+
+test('pose notes follow the frame count: add, remove, renumber, no duplicates', async () => {
+  const { syncPoseNotes, validatePoseNotes, poseNoteBody, generatePoseNotes } = await import('./gridLayout.ts');
+
+  const four = ['frame 1 of 4: a', 'frame 2 of 4: b', 'frame 3 of 4: c', 'frame 4 of 4: d'];
+  // Grow: existing notes kept, new ones added, all renumbered
+  const six = syncPoseNotes(four, 6, 'idle stance');
+  assert.equal(six.length, 6);
+  assert.equal(six[0], 'frame 1 of 6: a');
+  assert.equal(six[3], 'frame 4 of 6: d');
+  assert.match(six[5], /^frame 6 of 6: /);
+  // Shrink: extras dropped, renumbered
+  assert.deepEqual(syncPoseNotes(four, 2, 'idle'), ['frame 1 of 2: a', 'frame 2 of 2: b']);
+  // Duplicates are made unique; notes without a prefix get one
+  const dup = syncPoseNotes(['same pose', 'frame 2 of 3: Same  pose', 'other'], 3, 'idle');
+  assert.equal(new Set(dup.map((n) => poseNoteBody(n).toLowerCase())).size, 3);
+  assert.equal(dup[0], 'frame 1 of 3: same pose');
+  assert.match(dup[1], /^frame 2 of 3: Same {2}pose, loop 2$/);
+
+  // Auto-written notes never repeat, even past the end of a phase cycle
+  const twelve = generatePoseNotes('idle breathing', 12);
+  assert.equal(twelve.length, 12);
+  assert.equal(new Set(twelve.map(poseNoteBody)).size, 12);
+  assert.equal(validatePoseNotes(twelve, 12), null);
+
+  // Validation blocks mismatched counts and duplicates with a clear message
+  assert.match(validatePoseNotes(four, 6)!, /Pose notes \(4\) don't match the frame count \(6\)/);
+  assert.match(validatePoseNotes(['frame 1 of 2: x', 'frame 2 of 2: X'], 2)!, /Pose notes 1 and 2 are the same/);
+  assert.match(validatePoseNotes(['frame 1 of 2: x', 'frame 2 of 2: '], 2)!, /Pose note 2 is empty/);
+});
+
+test('template canvas has the exact requested aspect ratio with a centered cell block', async () => {
+  const { computeTemplateLayout, templateCellRects, getBestAspectRatio } = await import('./gridLayout.ts');
+  // 3x2 grid of 32x24 cells is 2:1, but the model is asked for 16:9
+  const aspect = getBestAspectRatio(3, 2, 32, 24);
+  assert.equal(aspect, '16:9');
+  const l = computeTemplateLayout(3, 2, 32, 24, aspect);
+  assert.equal(l.canvasW * 9, l.canvasH * 16); // exactly 16:9
+  assert.deepEqual([l.canvasW, l.canvasH], [768, 432]);
+  assert.ok(l.canvasW >= 3 * 32 * 8 && l.canvasH >= 2 * 24 * 8);
+  assert.deepEqual([l.offsetX, l.offsetY], [0, 24]); // centered vertically
+  assert.equal(l.offsetX % 8 + l.offsetY % 8 + l.canvasW % 8 + l.canvasH % 8, 0);
+
+  // Every layout keeps the exact ratio and fits the block
+  for (const [c, r, fw, fh] of [[2, 2, 24, 24], [3, 2, 24, 24], [4, 2, 24, 24], [4, 3, 32, 24], [2, 1, 32, 24]]) {
+    const a = getBestAspectRatio(c, r, fw, fh);
+    const [aw, ah] = a.split(':').map(Number);
+    const t = computeTemplateLayout(c, r, fw, fh, a);
+    assert.equal(t.canvasW * ah, t.canvasH * aw, `${c}x${r} ${fw}x${fh} ${a}`);
+    assert.ok(t.offsetX + c * fw * 8 <= t.canvasW && t.offsetY + r * fh * 8 <= t.canvasH);
+  }
+
+  // Slice rects in sprite pixels use the same positions
+  const rects = templateCellRects(l, 32, 24);
+  assert.equal(rects.length, 6);
+  assert.deepEqual(rects[0], { x: 0, y: 3, w: 32, h: 24 });
+  assert.deepEqual(rects[4], { x: 32, y: 27, w: 32, h: 24 });
+});
+
+/** Transparent canvas with opaque rectangles (sprite pixels). */
+function canvasWith(w: number, h: number, boxes: Array<[number, number, number, number]>): Uint8ClampedArray {
+  const px = new Uint8ClampedArray(w * h * 4);
+  for (const [x0, y0, bw, bh] of boxes) {
+    for (let y = y0; y < y0 + bh; y++) {
+      for (let x = x0; x < x0 + bw; x++) {
+        const i = (y * w + x) * 4;
+        px[i] = 47; px[i + 1] = 37; px[i + 2] = 34; px[i + 3] = 255;
+      }
+    }
+  }
+  return px;
+}
+
+test('grid detection finds the drawn layout from magenta gutters', async () => {
+  const { detectGrid, gridMatchesRequested, detectedCellRects } = await import('./gridLayout.ts');
+  // Requested 3x2 of 24x24 cells starting at (0,0); figures 10x16 centered in each cell
+  const requested = { originX: 0, originY: 0, cellW: 24, cellH: 24, cols: 3, rows: 2 };
+  const boxes3x2: Array<[number, number, number, number]> = [];
+  for (let r = 0; r < 2; r++) for (let c = 0; c < 3; c++) boxes3x2.push([c * 24 + 7, r * 24 + 4, 10, 16]);
+  const good = detectGrid(canvasWith(72, 48, boxes3x2), 72, 48);
+  assert.deepEqual([good.cols, good.rows], [3, 2]);
+  assert.equal(gridMatchesRequested(good, requested), true);
+
+  // A 1px gap inside a figure (between legs) is not a gutter
+  const legs = detectGrid(canvasWith(24, 24, [[7, 4, 4, 16], [12, 4, 4, 16]]), 24, 24);
+  assert.equal(legs.cols, 1);
+
+  // Fewer figures than cells (unused last cell) still matches
+  const five = detectGrid(canvasWith(72, 48, boxes3x2.slice(0, 5)), 72, 48);
+  assert.equal(gridMatchesRequested(five, requested), true);
+
+  // Model drew its own 4x3 grid on the same canvas: detected and reported as a mismatch
+  const boxes4x3: Array<[number, number, number, number]> = [];
+  for (let r = 0; r < 3; r++) for (let c = 0; c < 4; c++) boxes4x3.push([c * 18 + 4, r * 16 + 2, 10, 12]);
+  const wrong = detectGrid(canvasWith(72, 48, boxes4x3), 72, 48);
+  assert.deepEqual([wrong.cols, wrong.rows], [4, 3]);
+  assert.equal(gridMatchesRequested(wrong, requested), false);
+
+  // Same count but figures straddling the requested cell boundaries: mismatch
+  const shifted = detectGrid(canvasWith(72, 48, boxes3x2.map(([x, y, w, h]) => [x + 12, y, w, h] as [number, number, number, number]).filter(([x]) => x + 10 <= 72)), 72, 48);
+  assert.equal(gridMatchesRequested(shifted, requested), false);
+
+  // Detected cells split halfway through each gutter, reading order
+  const rects = detectedCellRects(wrong, 72, 48);
+  assert.equal(rects.length, 12);
+  assert.deepEqual(rects[0], { x: 0, y: 0, w: 18, h: 16 });
+  assert.equal(rects[3].x + rects[3].w, 72);
+  assert.equal(rects[11].y + rects[11].h, 48);
+});

@@ -76,6 +76,9 @@ export interface CleanupSettings {
   baselineY: number; // -1 = auto
   gridCols?: number;
   gridRows?: number;
+  // Template Fill: 'detected' slices with the grid the model actually drew (after the user
+  // chose that on a mismatch warning). Default slices at the requested template positions.
+  gridSource?: 'requested' | 'detected';
 }
 
 export interface ParallaxLayer {

@@ -52,7 +52,7 @@ export function buildGenerationPrompt(
           `Fill every empty cell with the next frame of this animation: ${config.description}. Same exact character as cell 1, same size, same baseline, same outline and colors. One figure per cell, centered. Keep the magenta background and the cell positions. Do not add text.`
         );
         parts.push(
-          `GRID SPECIFICATION: Layout is ${dims.cols} columns by ${dims.rows} rows (total ${dims.cols * dims.rows} cells). Frames proceed left-to-right, row-by-row in reading order. Exactly ${frameCount} animation frames. Any unused cells remain solid empty #FF00FF magenta.`
+          `GRID SPECIFICATION: The attached template is the canvas to edit. It contains a block of ${dims.cols} columns by ${dims.rows} rows (total ${dims.cols * dims.rows} cells) centered on a larger magenta canvas. Keep the canvas size, keep the block where it is, and leave the magenta margins around it empty. Frames proceed left-to-right, row-by-row in reading order. Exactly ${frameCount} animation frames: cell 1 is the anchor, and cells 2 to ${frameCount} are marked with small faint numbers in their top-left corners. Those numbers are labels only; do not copy them. Any unnumbered cells remain solid empty #FF00FF magenta. Do not add, remove, or move cells.`
         );
         parts.push(
           `ALIGNMENT: Every frame must touch the EXACT SAME BASELINE so the looped animation runs smoothly without jitter.`

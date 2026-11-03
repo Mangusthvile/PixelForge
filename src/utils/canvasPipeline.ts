@@ -12,7 +12,18 @@ import {
 } from './pipeline';
 import { CleanupSettings, GenerationConfig, StyleProfile, ParallaxLayer } from '../types';
 import { loadImage } from './export';
-import { getGridDimensions, detectCopyOfFrames } from './gridLayout';
+import {
+  getGridDimensions,
+  getBestAspectRatio,
+  detectCopyOfFrames,
+  computeTemplateLayout,
+  templateCellRects,
+  detectGrid,
+  gridMatchesRequested,
+  detectedCellRects,
+  CellRect,
+  TEMPLATE_SCALE,
+} from './gridLayout';
 
 export interface PipelineResult {
   cleanedCanvas: HTMLCanvasElement;
@@ -27,6 +38,18 @@ export interface PipelineResult {
   parallaxLayers?: ParallaxLayer[];
   hasCopiedAnchor?: boolean;
   copyWarning?: string;
+  /** Template Fill only: requested vs detected grid. */
+  gridCheck?: GridCheck;
+}
+
+export interface GridCheck {
+  requested: { cols: number; rows: number };
+  detected: { cols: number; rows: number };
+  matches: boolean;
+  /** True when frames were sliced with the detected grid instead of the requested one. */
+  usedDetected: boolean;
+  /** True when slicing was held back because the grids don't match (no frames returned). */
+  blocked: boolean;
 }
 
 export async function runCleanupPipeline(
@@ -76,7 +99,22 @@ export async function runCleanupPipeline(
   // 2. Scale. Template Fill results are grid-based, so the scale is computed from the
   // known layout; auto-detection is only used for assets that aren't grid-based.
   const isTemplateGrid = config.type === 'animation' && config.animationMode === 'template';
-  const computedScale = isTemplateGrid ? computeGridScale(rawW, cols, config.frameWidth) : undefined;
+  // Same layout the template was built with: exact requested aspect, centered cell block.
+  const templateLayout = isTemplateGrid
+    ? computeTemplateLayout(
+        cols,
+        rows,
+        config.frameWidth,
+        config.frameHeight,
+        getBestAspectRatio(cols, rows, config.frameWidth, config.frameHeight)
+      )
+    : undefined;
+  if (templateLayout) {
+    // The whole template canvas maps onto the raw image, in sprite pixels.
+    targetW = templateLayout.canvasW / TEMPLATE_SCALE;
+    targetH = templateLayout.canvasH / TEMPLATE_SCALE;
+  }
+  const computedScale = templateLayout ? computeGridScale(rawW, 1, targetW) : undefined;
   const detectedScale =
     computedScale !== undefined
       ? Math.max(1, Math.round(computedScale))
@@ -138,39 +176,88 @@ export async function runCleanupPipeline(
   let hasCopiedAnchor = false;
   let baselineY = -1;
 
+  let gridCheck: GridCheck | undefined;
+
   if (config.type === 'animation' && settings.sliceFrames) {
-    // Slicing reading order: row by row, column by column
-    const cellW = Math.max(1, Math.floor(curW / cols));
-    const cellH = Math.max(1, Math.floor(curH / rows));
+    // Cells to slice, in reading order (row by row, column by column)
+    let cellRects: CellRect[];
+    let sliceCount = frameCount;
+
+    if (templateLayout && curW === targetW && curH === targetH) {
+      // Detect the grid the model actually drew before slicing anything.
+      const detected = detectGrid(curPixels, curW, curH);
+      const requestedRects = templateCellRects(templateLayout, config.frameWidth, config.frameHeight);
+      const matches = gridMatchesRequested(detected, {
+        originX: requestedRects[0].x,
+        originY: requestedRects[0].y,
+        cellW: config.frameWidth,
+        cellH: config.frameHeight,
+        cols,
+        rows,
+      });
+      const useDetected = !matches && settings.gridSource === 'detected';
+      gridCheck = {
+        requested: { cols, rows },
+        detected: { cols: detected.cols, rows: detected.rows },
+        matches,
+        usedDetected: useDetected,
+        blocked: !matches && !useDetected,
+      };
+
+      if (gridCheck.blocked) {
+        // Never slice with a grid we know is wrong: return the cleaned sheet, no frames.
+        const sheetUrl = cleanedCanvas.toDataURL('image/png');
+        return {
+          cleanedCanvas,
+          cleanedDataUrl: sheetUrl,
+          detectedScale,
+          actualScaleUsed: actualScale,
+          computedScale,
+          frames: [],
+          baselineY: -1,
+          gridCheck,
+        };
+      }
+
+      if (useDetected) {
+        // Every detected cell that has a figure becomes a frame, in reading order.
+        cellRects = detectedCellRects(detected, curW, curH).filter(
+          (r) => getGridCellBounds(curPixels, curW, curH, r.x, r.x + r.w, r.y, r.y + r.h).hasContent
+        );
+        sliceCount = cellRects.length;
+      } else {
+        cellRects = requestedRects;
+      }
+    } else {
+      const cellW = Math.max(1, Math.floor(curW / cols));
+      const cellH = Math.max(1, Math.floor(curH / rows));
+      cellRects = [];
+      for (let r = 0; r < rows; r++) {
+        for (let c = 0; c < cols; c++) cellRects.push({ x: c * cellW, y: r * cellH, w: cellW, h: cellH });
+      }
+    }
+    sliceCount = Math.min(sliceCount, cellRects.length);
+
     const boundsList: Array<{ minX: number; maxX: number; minY: number; maxY: number; hasContent: boolean }> = [];
     let emptyCount = 0;
 
-    for (let f = 0; f < frameCount; f++) {
-      const c = f % cols;
-      const r = Math.floor(f / cols);
-
-      const startX = c * cellW;
-      const endX = Math.min(curW, (c + 1) * cellW);
-      const startY = r * cellH;
-      const endY = Math.min(curH, (r + 1) * cellH);
-
-      const bounds = getGridCellBounds(curPixels, curW, curH, startX, endX, startY, endY);
+    for (let f = 0; f < sliceCount; f++) {
+      const rect = cellRects[f];
+      const bounds = getGridCellBounds(curPixels, curW, curH, rect.x, rect.x + rect.w, rect.y, rect.y + rect.h);
       boundsList.push(bounds);
       if (!bounds.hasContent) emptyCount++;
     }
 
-    if (emptyCount > 0 && frameCount > 1) {
-      frameWarning = `Detected only ${frameCount - emptyCount} visible frames out of ${frameCount} requested. You can override frame count or retry.`;
+    if (emptyCount > 0 && sliceCount > 1) {
+      frameWarning = `Detected only ${sliceCount - emptyCount} visible frames out of ${sliceCount} requested. You can override frame count or retry.`;
     }
 
     // Determine baseline Y across all frames (bottom-most pixel row relative to cell origin)
     let maxRelativeBottomY = -1;
-    for (let f = 0; f < frameCount; f++) {
+    for (let f = 0; f < sliceCount; f++) {
       const b = boundsList[f];
       if (b.hasContent) {
-        const r = Math.floor(f / cols);
-        const cellTop = r * cellH;
-        const relativeY = b.maxY - cellTop;
+        const relativeY = b.maxY - cellRects[f].y;
         if (relativeY > maxRelativeBottomY) {
           maxRelativeBottomY = relativeY;
         }
@@ -185,7 +272,7 @@ export async function runCleanupPipeline(
         : config.frameHeight - 2;
 
     // Slice and align each frame into its individual canvas (config.frameWidth x config.frameHeight)
-    for (let f = 0; f < frameCount; f++) {
+    for (let f = 0; f < sliceCount; f++) {
       const frameCanvas = document.createElement('canvas');
       frameCanvas.width = config.frameWidth;
       frameCanvas.height = config.frameHeight;
@@ -193,9 +280,6 @@ export async function runCleanupPipeline(
       fCtx.imageSmoothingEnabled = false;
 
       const bounds = boundsList[f];
-      const c = f % cols;
-      const r = Math.floor(f / cols);
-      const cellTop = r * cellH;
 
       if (bounds.hasContent) {
         const charW = bounds.maxX - bounds.minX + 1;
@@ -239,12 +323,12 @@ export async function runCleanupPipeline(
 
     // Reassemble into ONE HORIZONTAL ROW for library, preview, and export
     const rowCanvas = document.createElement('canvas');
-    rowCanvas.width = config.frameWidth * frameCount;
+    rowCanvas.width = config.frameWidth * sliceCount;
     rowCanvas.height = config.frameHeight;
     const rowCtx = rowCanvas.getContext('2d', { willReadFrequently: true })!;
     rowCtx.imageSmoothingEnabled = false;
 
-    for (let f = 0; f < frameCount; f++) {
+    for (let f = 0; f < sliceCount; f++) {
       const imgElem = await loadImage(frames[f]);
       rowCtx.drawImage(imgElem, f * config.frameWidth, 0);
     }
@@ -262,6 +346,7 @@ export async function runCleanupPipeline(
       baselineY,
       hasCopiedAnchor,
       copyWarning,
+      gridCheck,
     };
   }
 

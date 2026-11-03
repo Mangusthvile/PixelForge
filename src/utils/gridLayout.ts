@@ -58,11 +58,18 @@ export function getBestAspectRatio(
 }
 
 /**
- * Generates context-aware pose notes from an action description and frame count
+ * Generates context-aware pose notes from an action description and frame count.
+ * Notes are numbered "frame N of M" and never repeat (a second pass through a cycle
+ * is marked ", loop 2").
  */
 export function generatePoseNotes(actionDescription: string, frameCount: number): string[] {
-  const desc = (actionDescription || '').toLowerCase();
   const count = Math.max(2, Math.min(12, frameCount));
+  return syncPoseNotes([], count, actionDescription);
+}
+
+/** Pose note texts (no "frame N of M" prefix) for an action; may repeat for long cycles. */
+function rawPoseBodies(actionDescription: string, count: number): string[] {
+  const desc = (actionDescription || '').toLowerCase();
 
   if (desc.includes('walk') || desc.includes('stride')) {
     const walkPhases = [
@@ -77,7 +84,7 @@ export function generatePoseNotes(actionDescription: string, frameCount: number)
     ];
     return Array.from({ length: count }, (_, i) => {
       const phase = walkPhases[i % walkPhases.length];
-      return `frame ${i + 1} of ${count}: ${phase}`;
+      return phase;
     });
   }
 
@@ -92,7 +99,7 @@ export function generatePoseNotes(actionDescription: string, frameCount: number)
     ];
     return Array.from({ length: count }, (_, i) => {
       const phase = runPhases[i % runPhases.length];
-      return `frame ${i + 1} of ${count}: ${phase}`;
+      return phase;
     });
   }
 
@@ -115,7 +122,7 @@ export function generatePoseNotes(actionDescription: string, frameCount: number)
     ];
     return Array.from({ length: count }, (_, i) => {
       const phase = attackPhases[i % attackPhases.length];
-      return `frame ${i + 1} of ${count}: ${phase}`;
+      return phase;
     });
   }
 
@@ -130,7 +137,7 @@ export function generatePoseNotes(actionDescription: string, frameCount: number)
     ];
     return Array.from({ length: count }, (_, i) => {
       const phase = jumpPhases[i % jumpPhases.length];
-      return `frame ${i + 1} of ${count}: ${phase}`;
+      return phase;
     });
   }
 
@@ -145,67 +152,67 @@ export function generatePoseNotes(actionDescription: string, frameCount: number)
     ];
     return Array.from({ length: count }, (_, i) => {
       const phase = idlePhases[i % idlePhases.length];
-      return `frame ${i + 1} of ${count}: ${phase}`;
+      return phase;
     });
   }
 
   // General fallback
   return Array.from({ length: count }, (_, i) => {
-    return `frame ${i + 1} of ${count}: progression step ${i + 1} of ${actionDescription || 'action'}`;
+    return `progression step ${i + 1} of ${actionDescription || 'action'}`;
   });
 }
 
 /**
  * Builds the Canvas Template Image for Template Fill Mode:
- * - Sized to grid: each cell = frameWidth * 8 by frameHeight * 8
- * - Solid #FF00FF magenta canvas
- * - Faint guide lines in #E000E0 between cells
- * - Anchor drawn in cell 1 (col 0, row 0) at 8x nearest-neighbor on the shared baseline
- * - Other cells empty
+ * - Canvas has exactly the aspect ratio requested from the model (see computeTemplateLayout);
+ *   the cols x rows block of cells (frame x 8 each) is centered and the rest is magenta padding
+ * - Faint #E000E0 guide lines around and between cells
+ * - Anchor drawn in cell 1 at 8x nearest-neighbor on the shared baseline
+ * - Cells 2..frameCount get their number drawn faintly in the top-left corner in #E000E0
+ *   (the cleanup keys this color out); cells past frameCount stay blank
  */
 export async function buildGridTemplateImage(
   anchorDataUrl: string,
-  cols: number,
-  rows: number,
+  layout: TemplateLayout,
   frameWidth: number,
   frameHeight: number,
+  frameCount: number,
   baselineY?: number
 ): Promise<string> {
-  const cellW = frameWidth * 8;
-  const cellH = frameHeight * 8;
-  const totalW = cols * cellW;
-  const totalH = rows * cellH;
+  const { cols, rows, cellW, cellH, canvasW, canvasH, offsetX, offsetY } = layout;
+  const gridW = cols * cellW;
+  const gridH = rows * cellH;
 
   const canvas = document.createElement('canvas');
-  canvas.width = totalW;
-  canvas.height = totalH;
+  canvas.width = canvasW;
+  canvas.height = canvasH;
   const ctx = canvas.getContext('2d', { willReadFrequently: true })!;
 
-  // 1. Fill solid #FF00FF vibrant magenta
+  // 1. Solid #FF00FF magenta everywhere (cells and padding)
   ctx.fillStyle = '#FF00FF';
-  ctx.fillRect(0, 0, totalW, totalH);
+  ctx.fillRect(0, 0, canvasW, canvasH);
 
-  // 2. Faint guide lines between cells in #E000E0 (1px wide)
-  ctx.strokeStyle = '#E000E0';
-  ctx.lineWidth = 1;
-
-  for (let c = 1; c < cols; c++) {
-    const x = c * cellW;
-    ctx.beginPath();
-    ctx.moveTo(x, 0);
-    ctx.lineTo(x, totalH);
-    ctx.stroke();
+  // 2. Faint 1px guide lines in #E000E0: block outline and lines between cells
+  ctx.fillStyle = '#E000E0';
+  for (let c = 0; c <= cols; c++) {
+    ctx.fillRect(offsetX + Math.min(c * cellW, gridW - 1), offsetY, 1, gridH);
+  }
+  for (let r = 0; r <= rows; r++) {
+    ctx.fillRect(offsetX, offsetY + Math.min(r * cellH, gridH - 1), gridW, 1);
   }
 
-  for (let r = 1; r < rows; r++) {
-    const y = r * cellH;
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(totalW, y);
-    ctx.stroke();
+  // 3. Cell numbers for the cells the model must fill
+  const fontPx = Math.max(10, Math.round(Math.min(cellW, cellH) * 0.12));
+  ctx.font = `bold ${fontPx}px sans-serif`;
+  ctx.textBaseline = 'top';
+  ctx.fillStyle = '#E000E0';
+  for (let i = 1; i < Math.min(frameCount, cols * rows); i++) {
+    const x = offsetX + (i % cols) * cellW;
+    const y = offsetY + Math.floor(i / cols) * cellH;
+    ctx.fillText(String(i + 1), x + 4, y + 4);
   }
 
-  // 3. Draw Anchor in cell 1 (col 0, row 0) at 8x with nearest-neighbor scaling
+  // 4. Anchor in cell 1 at 8x with nearest-neighbor scaling
   if (anchorDataUrl) {
     try {
       const img = new Image();
@@ -216,29 +223,25 @@ export async function buildGridTemplateImage(
       });
 
       ctx.imageSmoothingEnabled = false;
-
       const imgW = img.naturalWidth || img.width;
       const imgH = img.naturalHeight || img.height;
 
-      // Calculate anchor bounds or draw centered in cell 1
       let drawW = cellW;
       let drawH = cellH;
-
       if (imgW <= frameWidth && imgH <= frameHeight) {
-        drawW = imgW * 8;
-        drawH = imgH * 8;
+        drawW = imgW * TEMPLATE_SCALE;
+        drawH = imgH * TEMPLATE_SCALE;
       } else {
-        // Already scaled or proportional
         const scale = Math.min(cellW / imgW, cellH / imgH);
         drawW = Math.round(imgW * scale);
         drawH = Math.round(imgH * scale);
       }
 
-      const drawX = Math.round((cellW - drawW) / 2);
-      // Place feet on baseline if specified, else bottom with 1-cell-pixel (8 screen px) margin
+      const drawX = offsetX + Math.round((cellW - drawW) / 2);
+      // Feet on the baseline if given, else bottom with a 1 sprite-pixel margin
       const baselinePx =
-        baselineY !== undefined && baselineY >= 0 ? (baselineY + 1) * 8 : cellH - 8;
-      const drawY = Math.max(0, baselinePx - drawH);
+        baselineY !== undefined && baselineY >= 0 ? (baselineY + 1) * TEMPLATE_SCALE : cellH - TEMPLATE_SCALE;
+      const drawY = offsetY + Math.max(0, baselinePx - drawH);
 
       ctx.drawImage(img, 0, 0, imgW, imgH, drawX, drawY, drawW, drawH);
     } catch (e) {
@@ -299,4 +302,244 @@ export function detectCopyOfFrames(
     isCopied: similarity > 94,
     similarityPercent: Math.round(similarity),
   };
+}
+
+// ---------------------------------------------------------------------------
+// Pose notes: always one unique note per frame, numbered "frame N of M"
+// ---------------------------------------------------------------------------
+
+const NOTE_PREFIX = /^\s*frame\s+\d+\s+of\s+\d+\s*[:\-–]?\s*/i;
+
+/** The text of a pose note without its "frame N of M:" prefix. */
+export function poseNoteBody(note: string): string {
+  return (note || '').replace(NOTE_PREFIX, '').trim();
+}
+
+const noteKey = (body: string) => body.toLowerCase().replace(/\s+/g, ' ').trim();
+
+/** Make every body unique: repeats of a cycle get ", loop 2", ", loop 3", ... */
+function makeUnique(bodies: string[]): string[] {
+  const seen = new Set<string>();
+  return bodies.map((body) => {
+    let candidate = body;
+    let loop = 2;
+    while (seen.has(noteKey(candidate))) {
+      candidate = `${body}, loop ${loop++}`;
+    }
+    seen.add(noteKey(candidate));
+    return candidate;
+  });
+}
+
+function numberNotes(bodies: string[]): string[] {
+  return bodies.map((b, i) => `frame ${i + 1} of ${bodies.length}: ${b}`);
+}
+
+/**
+ * Match pose notes to the frame count: keep existing notes in order, drop extras,
+ * fill missing ones from the auto-written phases, remove duplicates, and renumber
+ * every note "frame N of M".
+ */
+export function syncPoseNotes(notes: string[], frameCount: number, description: string): string[] {
+  const count = Math.max(1, Math.floor(frameCount) || 1);
+  const generated = rawPoseBodies(description, count);
+  const bodies: string[] = [];
+  for (let i = 0; i < count; i++) {
+    const existing = poseNoteBody((notes || [])[i] || '');
+    bodies.push(existing || generated[i]);
+  }
+  return numberNotes(makeUnique(bodies));
+}
+
+/** Null when the notes are usable for generation, otherwise a message saying what to fix. */
+export function validatePoseNotes(notes: string[], frameCount: number): string | null {
+  const list = notes || [];
+  if (list.length !== frameCount) {
+    return `Pose notes (${list.length}) don't match the frame count (${frameCount}). Change Frames or click "Auto-write notes".`;
+  }
+  const firstIndex = new Map<string, number>();
+  for (let i = 0; i < list.length; i++) {
+    const body = poseNoteBody(list[i]);
+    if (!body) return `Pose note ${i + 1} is empty.`;
+    const key = noteKey(body);
+    if (firstIndex.has(key)) {
+      return `Pose notes ${firstIndex.get(key)! + 1} and ${i + 1} are the same. Each frame needs its own pose.`;
+    }
+    firstIndex.set(key, i);
+  }
+  return null;
+}
+
+// ---------------------------------------------------------------------------
+// Template canvas layout (exact requested aspect ratio, centered cell block)
+// ---------------------------------------------------------------------------
+
+export const TEMPLATE_SCALE = 8;
+
+export interface TemplateLayout {
+  aspectRatio: string;
+  cols: number;
+  rows: number;
+  /** Template canvas size in template pixels (multiples of TEMPLATE_SCALE). */
+  canvasW: number;
+  canvasH: number;
+  /** One cell in template pixels. */
+  cellW: number;
+  cellH: number;
+  /** Top-left of the cell block in template pixels (multiples of TEMPLATE_SCALE). */
+  offsetX: number;
+  offsetY: number;
+}
+
+export function parseAspect(aspect: string): [number, number] {
+  const [a, b] = aspect.split(':').map((n) => parseInt(n, 10));
+  return a > 0 && b > 0 ? [a, b] : [1, 1];
+}
+
+/**
+ * Canvas with exactly the aspect ratio requested from the model, big enough for the
+ * cols x rows block of (frame x 8) cells, padded with magenta and the block centered.
+ * Canvas size and offsets are multiples of 8, so in sprite pixels (template / 8) every
+ * cell lands on whole pixels and slicing uses the same positions as the template.
+ */
+export function computeTemplateLayout(
+  cols: number,
+  rows: number,
+  frameWidth: number,
+  frameHeight: number,
+  aspectRatio: string
+): TemplateLayout {
+  const s = TEMPLATE_SCALE;
+  const cellW = frameWidth * s;
+  const cellH = frameHeight * s;
+  const gridW = cols * cellW;
+  const gridH = rows * cellH;
+  const [a, b] = parseAspect(aspectRatio);
+  // canvas = (a*k) x (b*k), k a multiple of 8 so both sides are multiples of 8
+  const k = s * Math.ceil(Math.max(gridW / a, gridH / b) / s);
+  const canvasW = a * k;
+  const canvasH = b * k;
+  const offsetX = s * Math.floor((canvasW - gridW) / 2 / s);
+  const offsetY = s * Math.floor((canvasH - gridH) / 2 / s);
+  return { aspectRatio, cols, rows, canvasW, canvasH, cellW, cellH, offsetX, offsetY };
+}
+
+export interface CellRect {
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+}
+
+/** Cell rectangles in sprite pixels (template / 8), reading order. */
+export function templateCellRects(layout: TemplateLayout, frameWidth: number, frameHeight: number): CellRect[] {
+  const ox = layout.offsetX / TEMPLATE_SCALE;
+  const oy = layout.offsetY / TEMPLATE_SCALE;
+  const rects: CellRect[] = [];
+  for (let r = 0; r < layout.rows; r++) {
+    for (let c = 0; c < layout.cols; c++) {
+      rects.push({ x: ox + c * frameWidth, y: oy + r * frameHeight, w: frameWidth, h: frameHeight });
+    }
+  }
+  return rects;
+}
+
+// ---------------------------------------------------------------------------
+// Grid detection from magenta (transparent after keying) gutters
+// ---------------------------------------------------------------------------
+
+export interface Band {
+  start: number; // inclusive
+  end: number; // inclusive
+}
+
+export interface DetectedGrid {
+  cols: number;
+  rows: number;
+  colBands: Band[];
+  rowBands: Band[];
+}
+
+/** Runs of indices where `filled[i]` is true, merging runs split by gaps narrower than minGap. */
+function findBands(filled: boolean[], minGap: number): Band[] {
+  const bands: Band[] = [];
+  let i = 0;
+  while (i < filled.length) {
+    if (!filled[i]) {
+      i++;
+      continue;
+    }
+    const start = i;
+    while (i < filled.length && filled[i]) i++;
+    const band = { start, end: i - 1 };
+    const prev = bands[bands.length - 1];
+    if (prev && band.start - prev.end - 1 < minGap) prev.end = band.end;
+    else bands.push(band);
+  }
+  return bands;
+}
+
+/**
+ * Detect the cell layout the model actually drew. After magenta keying, gutters are
+ * columns / rows with no opaque pixel; figures are the runs between them. Gaps narrower
+ * than `minGap` pixels are treated as part of a figure (e.g. between legs).
+ */
+export function detectGrid(pixels: Uint8ClampedArray, width: number, height: number, minGap = 2): DetectedGrid {
+  const colFilled = new Array<boolean>(width).fill(false);
+  const rowFilled = new Array<boolean>(height).fill(false);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      if (pixels[(y * width + x) * 4 + 3] > 0) {
+        colFilled[x] = true;
+        rowFilled[y] = true;
+      }
+    }
+  }
+  const colBands = findBands(colFilled, minGap);
+  const rowBands = findBands(rowFilled, minGap);
+  return { cols: colBands.length, rows: rowBands.length, colBands, rowBands };
+}
+
+/**
+ * The detected layout matches the requested one when every figure band sits inside a
+ * single requested cell (columns and rows checked separately). A band crossing a cell
+ * boundary, or more bands than cells, means the model drew its own grid.
+ */
+export function gridMatchesRequested(
+  detected: DetectedGrid,
+  cells: { originX: number; originY: number; cellW: number; cellH: number; cols: number; rows: number },
+  tolerance = 1
+): boolean {
+  if (detected.cols === 0 || detected.rows === 0) return true; // nothing drawn: nothing to contradict
+  if (detected.cols > cells.cols || detected.rows > cells.rows) return false;
+  const fits = (band: Band, origin: number, size: number, count: number) => {
+    const first = Math.floor((band.start + tolerance - origin) / size);
+    const last = Math.floor((band.end - tolerance - origin) / size);
+    return first === last && first >= 0 && first < count;
+  };
+  return (
+    detected.colBands.every((b) => fits(b, cells.originX, cells.cellW, cells.cols)) &&
+    detected.rowBands.every((b) => fits(b, cells.originY, cells.cellH, cells.rows))
+  );
+}
+
+/** Cell rectangles for a detected grid: split halfway through each gutter, reading order. */
+export function detectedCellRects(detected: DetectedGrid, width: number, height: number): CellRect[] {
+  const splits = (bands: Band[], size: number) => {
+    const edges = [0];
+    for (let i = 1; i < bands.length; i++) {
+      edges.push(Math.floor((bands[i - 1].end + 1 + bands[i].start) / 2));
+    }
+    edges.push(size);
+    return edges;
+  };
+  const xs = splits(detected.colBands, width);
+  const ys = splits(detected.rowBands, height);
+  const rects: CellRect[] = [];
+  for (let r = 0; r < detected.rows; r++) {
+    for (let c = 0; c < detected.cols; c++) {
+      rects.push({ x: xs[c], y: ys[r], w: xs[c + 1] - xs[c], h: ys[r + 1] - ys[r] });
+    }
+  }
+  return rects;
 }
