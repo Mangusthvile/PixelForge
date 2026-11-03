@@ -1,0 +1,6 @@
+{
+  "name": "PixelForge Studio",
+  "description": "Consistent pixel art generator for game sprites, animation sheets, props, and layered backgrounds with style profiles and browser-based cleanup pipeline.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
