@@ -408,9 +408,9 @@ export const AnimationPreview: React.FC<AnimationPreviewProps> = ({
                 disabled={isAutoCleaning}
                 data-testid="fix-sizes"
                 className="flex items-center gap-1 px-2 py-0.5 rounded bg-amber-500/15 border border-amber-500/40 text-[11px] text-amber-300 hover:bg-amber-500/25 disabled:opacity-50"
-                title="Stretch or shrink flagged frames' body to the anchor's height (undoable)"
+                title="Move flagged frames up or down so their feet line up with the anchor's baseline. Never resizes. Asks first; undoable."
               >
-                <span>Fix sizes ({flaggedCount})</span>
+                <span>Fix sizes: align feet ({flaggedCount})</span>
               </button>
             )}
             {onAutoClean && (
@@ -500,7 +500,7 @@ export const AnimationPreview: React.FC<AnimationPreviewProps> = ({
                         disabled={isAutoCleaning}
                         data-testid={`fix-size-${idx}`}
                         className="ml-1 underline font-semibold hover:text-amber-100 disabled:opacity-50"
-                        title="Stretch or shrink this frame's body to the anchor's height (undoable)"
+                        title="Move this frame up or down so its feet line up with the anchor's baseline. Never resizes. Asks first; undoable."
                       >
                         Fix
                       </button>

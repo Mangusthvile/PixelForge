@@ -767,54 +767,98 @@ test('touch-up file names round-trip', async () => {
   assert.equal(parseTouchUpFileName('fig_x_0x24_5f.png'), null);
 });
 
-test('fixBodyHeight stretches a short body / shrinks a tall one, feet stay on the baseline', async () => {
-  const { fixBodyHeight, bodyHeight } = await import('./autoClean.ts');
+/** 24x24 rows: outline box with a body `bodyRows` tall whose last body row is `bodyBottom`. */
+function figureRows(w: number, h: number, bodyRows: number, bodyBottom: number, extra?: (rows: string[][]) => void): string[] {
+  const g = Array.from({ length: h }, () => Array.from({ length: w }, () => '.'));
+  const top = bodyBottom - bodyRows + 1;
+  for (let y = top - 1; y <= bodyBottom + 1; y++) for (let x = 7; x <= 16; x++) g[y][x] = 'O';
+  for (let y = top; y <= bodyBottom; y++) for (let x = 8; x <= 15; x++) g[y][x] = 'B';
+  g[top + 2][10] = 'O'; // eyes
+  g[top + 2][13] = 'O';
+  extra?.(g);
+  return g.map((r) => r.join(''));
+}
+
+/** The 24x24 figure stored like the real anchor: 8x on solid magenta (192x192). */
+function anchorAt8x() {
+  const small = frameFromRows(figureRows(24, 24, 15, 20));
+  const s = 8;
+  const W = 24 * s;
+  const px = new Uint8ClampedArray(W * W * 4);
+  for (let y = 0; y < W; y++) {
+    for (let x = 0; x < W; x++) {
+      const si = (Math.floor(y / s) * 24 + Math.floor(x / s)) * 4;
+      const di = (y * W + x) * 4;
+      if (small.px[si + 3] === 0) px.set([255, 0, 255, 255], di);
+      else px.set(small.px.subarray(si, si + 4), di);
+    }
+  }
+  return { px, w: W, h: W };
+}
+
+test('anchor is measured at true size from its own 8x scale, not the frame size', async () => {
+  const { measureAnchorPixels, detectIntegerScale, measureFigure, sizeCheck } = await import('./autoClean.ts');
   const { roleOf } = await characterRoleOf();
-  // Body rows 2..6 (5 tall) with outline sides; eye row has an interior outline pixel.
-  const short = frameFromRows([
-    '.......',
-    '.OOOOO.',
-    '.OBBBO.',
-    '.OBOBO.', // eyes: interior outline -> avoided
-    '.OBBBO.',
-    '.OBBBO.',
-    '.OBBBO.',
-    '.OOOOO.',
-  ]);
-  assert.equal(bodyHeight(short.px, short.w, short.h, roleOf), 5);
+  const anchor = anchorAt8x();
+  const m = measureAnchorPixels(anchor.px, anchor.w, anchor.h, roleOf, { width: 24, height: 24 });
+  assert.equal(m.scale, 8);
+  assert.deepEqual([m.width, m.height], [24, 24]);
+  assert.equal(m.bodyHeight, 15);
+  assert.equal(m.bottomGap, 2); // feet (outline) on row 21 of 24
 
-  // Too short by 1 (anchor 6): one plain interior row duplicated, feet row unchanged
-  const grown = fixBodyHeight(short.px, short.w, short.h, roleOf, 6);
-  assert.equal(grown.delta, 1);
-  assert.equal(bodyHeight(grown.pixels, short.w, short.h, roleOf), 6);
-  assert.deepEqual(rowsFromFrame(grown.pixels, short.w, short.h), [
-    '.OOOOO.',
-    '.OBBBO.',
-    '.OBOBO.',
-    '.OBBBO.',
-    '.OBBBO.', // duplicated row nearest the middle among plain rows
-    '.OBBBO.',
-    '.OBBBO.',
-    '.OOOOO.',
-  ]);
+  // A 24x24 frame with a 15px body is NOT flagged against the 8x anchor
+  const frame = frameFromRows(figureRows(24, 24, 15, 20));
+  const fh = measureFigure(frame.px, frame.w, frame.h, roleOf).bodyHeight;
+  assert.equal(fh, 15);
+  assert.deepEqual(sizeCheck([fh], m.bodyHeight), [null]);
 
-  // Too tall by 2 (anchor 3): two plain rows removed, transparent rows padded on top
-  const shrunk = fixBodyHeight(short.px, short.w, short.h, roleOf, 3);
-  assert.equal(shrunk.delta, -2);
-  const rows = rowsFromFrame(shrunk.pixels, short.w, short.h);
-  assert.equal(bodyHeight(shrunk.pixels, short.w, short.h, roleOf), 3);
-  assert.equal(rows[7], '.OOOOO.'); // feet row still at the bottom
-  assert.ok(rows.includes('.OBOBO.')); // eye row kept
-  assert.deepEqual(rows.slice(0, 3), ['.......', '.......', '.......']);
+  // fig_mine case: 32x24 frames with 14-15px bodies are not flagged either (anchor scale is
+  // not derived from the frame width; 192/32 would wrongly give 6x and a 20px anchor)
+  const wide = frameFromRows(figureRows(32, 24, 14, 20));
+  const wh = measureFigure(wide.px, wide.w, wide.h, roleOf).bodyHeight;
+  assert.equal(wh, 14);
+  assert.deepEqual(sizeCheck([wh, 15], m.bodyHeight), [null, null]);
+  // Only differences over 1px are flagged
+  assert.deepEqual(sizeCheck([13, 17], m.bodyHeight), ['2px shorter than anchor', '2px taller than anchor']);
 
-  // Not enough empty space above the head to grow by 2: left alone
-  const noRoom = fixBodyHeight(short.px, short.w, short.h, roleOf, 7);
-  assert.equal(noRoom.delta, 0);
-  assert.equal(noRoom.skipped, 'no room above the head');
+  assert.equal(detectIntegerScale(frame.px, frame.w, frame.h), 1);
+});
 
-  // Deterministic
-  assert.deepEqual(
-    Array.from(fixBodyHeight(short.px, short.w, short.h, roleOf, 6).pixels),
-    Array.from(grown.pixels)
-  );
+test('body height uses only body colors of the main figure (smear trails, tools, outline ignored)', async () => {
+  const { measureFigure } = await import('./autoClean.ts');
+  const { roleOf } = await characterRoleOf();
+  // Hammer smear: detached light-grey (#bdbdbd, a body color) trail from row 1 to row 22,
+  // plus a tool handle touching the figure. Body must still read 15, not 22.
+  const rows = figureRows(24, 24, 15, 20, (g) => {
+    for (let y = 1; y <= 22; y++) g[y][2] = 'G';
+    for (let y = 1; y <= 22; y++) g[y][3] = 'G';
+    for (let y = 2; y <= 8; y++) g[y][18] = 'T';
+  });
+  const f = frameFromRows(rows);
+  assert.equal(measureFigure(f.px, f.w, f.h, roleOf).bodyHeight, 15);
+  // Outline-only rows above/below the body don't count
+  assert.equal(measureFigure(frameFromRows(['.OOO.', '.OBO.', '.OOO.']).px, 5, 3, roleOf).bodyHeight, 1);
+});
+
+test('Fix only moves frames to the anchor baseline, never resizes', async () => {
+  const { feetAlignmentShift, shiftFrameVertical, measureFigure } = await import('./autoClean.ts');
+  const { roleOf } = await characterRoleOf();
+  // Anchor feet gap is 2 (feet on row 21). This frame's feet are on row 19 -> move down 2.
+  const f = frameFromRows(figureRows(24, 24, 14, 18));
+  const dy = feetAlignmentShift(f.px, f.w, f.h, roleOf, 2);
+  assert.equal(dy, 2);
+  const moved = shiftFrameVertical(f.px, f.w, f.h, dy)!;
+  assert.equal(moved.length, f.px.length); // same frame size
+  const before = measureFigure(f.px, f.w, f.h, roleOf);
+  const after = measureFigure(moved, f.w, f.h, roleOf);
+  assert.equal(after.bodyHeight, before.bodyHeight); // not stretched
+  assert.equal(after.bottomRow, 21);
+  // Same pixels, just lower
+  assert.deepEqual(rowsFromFrame(moved, f.w, f.h).slice(2), rowsFromFrame(f.px, f.w, f.h).slice(0, 22));
+
+  // Already aligned: no move
+  const ok = frameFromRows(figureRows(24, 24, 15, 20));
+  assert.equal(feetAlignmentShift(ok.px, ok.w, ok.h, roleOf, 2), 0);
+  // A move that would cut off pixels at the edge is refused
+  assert.equal(shiftFrameVertical(ok.px, ok.w, ok.h, 3), null);
 });

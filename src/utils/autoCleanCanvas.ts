@@ -6,12 +6,14 @@ import {
   AutoCleanStats,
   autoCleanPixels,
   bodyHeight,
-  fixBodyHeight,
   makeRoleLookup,
+  measureAnchorPixels,
+  AnchorMeasure,
+  feetAlignmentShift,
+  shiftFrameVertical,
   resolvePaletteRoles,
   RoleOf,
 } from './autoClean';
-import { keyOutMagentaData, downscaleBlockModeData } from './pipeline';
 
 export interface PixelImage {
   pixels: Uint8ClampedArray;
@@ -80,26 +82,64 @@ export async function measureBodyHeights(frames: string[], profile: StyleProfile
 }
 
 /**
- * Body height of the profile's Anchor at sprite scale. Anchors are usually drawn at 8x on
- * magenta: key the magenta out, then downscale by the whole-number scale that maps the
- * image onto the frame size.
+ * Measure the profile's Anchor at true size. The scale comes from the anchor image itself
+ * (8x for a 192x192 reference), never from the frame size being checked; the profile's
+ * own frame size is only a fallback hint.
  */
-export async function measureAnchorBodyHeight(
-  profile: StyleProfile,
-  frameWidth: number,
-  frameHeight: number
-): Promise<number> {
+export async function measureAnchor(profile: StyleProfile): Promise<AnchorMeasure | null> {
   const anchor =
     profile.references.find((r) => r.isAnchor || r.id === profile.anchorId) || profile.references[0];
-  if (!anchor) return 0;
+  if (!anchor) return null;
   const img = await readPixels(anchor.base64 || anchor.url);
-  const pixels = new Uint8ClampedArray(img.pixels);
-  keyOutMagentaData(pixels, 35);
-  const scale = Math.max(1, Math.round(Math.min(img.width / frameWidth, img.height / frameHeight)));
-  const w = Math.max(1, Math.round(img.width / scale));
-  const h = Math.max(1, Math.round(img.height / scale));
-  const small = scale > 1 ? downscaleBlockModeData(pixels, img.width, img.height, w, h) : pixels;
-  return bodyHeight(small, w, h, roleLookupFor(profile));
+  return measureAnchorPixels(img.pixels, img.width, img.height, roleLookupFor(profile), {
+    width: profile.frameWidth,
+    height: profile.frameHeight,
+  });
+}
+
+export interface FeetMove {
+  index: number;
+  /** Rows to move: positive = down, negative = up. */
+  dy: number;
+  /** Set when the move would push pixels out of the frame (not applied). */
+  blocked?: boolean;
+}
+
+/** Vertical moves that would put each frame's feet on the anchor's baseline. Nothing is resized. */
+export async function proposeFeetAlignment(
+  frames: string[],
+  profile: StyleProfile,
+  anchor: AnchorMeasure,
+  indices: number[]
+): Promise<FeetMove[]> {
+  const roleOf = roleLookupFor(profile);
+  const moves: FeetMove[] = [];
+  for (const index of indices) {
+    if (!frames[index]) continue;
+    const img = await readPixels(frames[index]);
+    const dy = feetAlignmentShift(img.pixels, img.width, img.height, roleOf, anchor.bottomGap);
+    if (dy === 0) continue;
+    const blocked = shiftFrameVertical(img.pixels, img.width, img.height, dy) === null;
+    moves.push({ index, dy, blocked });
+  }
+  return moves;
+}
+
+/** Apply the (unblocked) moves; returns the new frame list. */
+export async function applyFeetAlignment(frames: string[], moves: FeetMove[]): Promise<string[]> {
+  const out = [...frames];
+  for (const m of moves) {
+    if (m.blocked) continue;
+    const img = await readPixels(frames[m.index]);
+    const shifted = shiftFrameVertical(img.pixels, img.width, img.height, m.dy);
+    if (shifted) out[m.index] = pixelsToDataUrl({ pixels: shifted, width: img.width, height: img.height });
+  }
+  return out;
+}
+
+export function describeFeetMove(m: FeetMove): string {
+  const dir = m.dy > 0 ? 'down' : 'up';
+  return `Frame ${m.index + 1}: move ${dir} ${Math.abs(m.dy)}px${m.blocked ? ' (skipped: would cut off pixels at the edge)' : ''}`;
 }
 
 export function formatAutoCleanStats(s: AutoCleanStats): string {
@@ -109,36 +149,4 @@ export function formatAutoCleanStats(s: AutoCleanStats): string {
     s.pinholes ? `filled ${s.pinholes} pinhole${s.pinholes === 1 ? '' : 's'}` : '',
   ].filter(Boolean);
   return parts.length ? `Auto Clean: ${parts.join(', ')}.` : 'Auto Clean: nothing to fix.';
-}
-
-/**
- * Bring the given frames' body height to the anchor's (see fixBodyHeight).
- * Returns new frame URLs plus a per-frame result for reporting.
- */
-export async function fixFrameHeights(
-  frames: string[],
-  profile: StyleProfile,
-  anchorHeight: number,
-  indices: number[]
-): Promise<{ frames: string[]; results: Array<{ index: number; delta: number; skipped?: string }> }> {
-  const roleOf = roleLookupFor(profile);
-  const out = [...frames];
-  const results: Array<{ index: number; delta: number; skipped?: string }> = [];
-  for (const index of indices) {
-    if (!frames[index]) continue;
-    const img = await readPixels(frames[index]);
-    const res = fixBodyHeight(img.pixels, img.width, img.height, roleOf, anchorHeight);
-    if (res.delta !== 0) out[index] = pixelsToDataUrl({ pixels: res.pixels, width: img.width, height: img.height });
-    results.push({ index, delta: res.delta, skipped: res.skipped });
-  }
-  return { frames: out, results };
-}
-
-export function formatHeightFixResults(results: Array<{ index: number; delta: number; skipped?: string }>): string {
-  const parts = results.map((r) =>
-    r.delta !== 0
-      ? `frame ${r.index + 1} ${r.delta > 0 ? '+' : '−'}${Math.abs(r.delta)}px`
-      : `frame ${r.index + 1} skipped (${r.skipped || 'already matches'})`
-  );
-  return parts.length ? `Size fix: ${parts.join(', ')}.` : 'Size fix: no frames to fix.';
 }

@@ -21,7 +21,7 @@ import {
 } from 'lucide-react';
 import { extractPaletteFromImageUrl } from '../utils/canvasPipeline';
 import { getDefaultProfile } from '../utils/storage';
-import { PALETTE_ROLES, PaletteRole, resolvePaletteRoles } from '../utils/autoClean';
+import { PALETTE_ROLES, PaletteRole, resolvePaletteRoles, AnchorMeasure } from '../utils/autoClean';
 
 const ROLE_LETTER: Record<PaletteRole, string> = { body: 'B', outline: 'O', tool: 'T', effect: 'E' };
 
@@ -34,6 +34,8 @@ interface ProfilePanelProps {
   onDuplicateProfile: (profile: StyleProfile) => void;
   onDeleteProfile: (profileId: string) => void;
   onResetProfileToDefaults: (profileId: string) => void;
+  /** Anchor measured at true size, for the size check. */
+  anchorInfo?: AnchorMeasure | null;
 }
 
 export const ProfilePanel: React.FC<ProfilePanelProps> = ({
@@ -45,6 +47,7 @@ export const ProfilePanel: React.FC<ProfilePanelProps> = ({
   onDuplicateProfile,
   onDeleteProfile,
   onResetProfileToDefaults,
+  anchorInfo,
 }) => {
   const [isRenaming, setIsRenaming] = useState(false);
   const [renameValue, setRenameValue] = useState(activeProfile.name);
@@ -494,6 +497,19 @@ export const ProfilePanel: React.FC<ProfilePanelProps> = ({
 
       {/* Style Reference Images & Anchor Reference */}
       <div className="space-y-2 pt-1 border-t border-zinc-800/80">
+        <p data-testid="anchor-body-height" className="text-[11px] text-zinc-400">
+          {anchorInfo && anchorInfo.bodyHeight > 0 ? (
+            <>
+              Anchor body height: <span className="font-mono text-amber-300">{anchorInfo.bodyHeight}px</span>
+              <span className="text-zinc-500">
+                {' '}
+                (reference at {anchorInfo.scale}x, {anchorInfo.width}×{anchorInfo.height} at true size)
+              </span>
+            </>
+          ) : (
+            <span className="text-zinc-500">Anchor body height: not measured (no anchor or no body-role colors)</span>
+          )}
+        </p>
         <div className="flex items-center justify-between">
           <div className="flex items-center gap-1.5">
             <label className="text-[11px] font-medium text-zinc-400">

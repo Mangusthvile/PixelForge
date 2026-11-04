@@ -26,11 +26,14 @@ import { buildStripDataUrl } from './utils/strip';
 import {
   autoCleanFrameUrls,
   measureBodyHeights,
-  measureAnchorBodyHeight,
+  measureAnchor,
   formatAutoCleanStats,
-  fixFrameHeights,
-  formatHeightFixResults,
+  proposeFeetAlignment,
+  applyFeetAlignment,
+  describeFeetMove,
+  FeetMove,
 } from './utils/autoCleanCanvas';
+import { AnchorMeasure } from './utils/autoClean';
 import { sizeCheck } from './utils/autoClean';
 import { buildGenerationPrompt } from './utils/promptBuilder';
 import {
@@ -307,28 +310,47 @@ export default function App() {
     }
   };
 
-  // Size fix (undoable): stretch / shrink flagged frames' body to the anchor's height.
+  // "Fix" never resizes: it only moves frames up/down so the feet sit on the anchor's
+  // baseline, and only after the user confirms the listed moves. Undoable.
+  const [feetConfirm, setFeetConfirm] = useState<FeetMove[] | null>(null);
   const handleFixSizes = async (indices?: number[]) => {
     const targets =
-      indices ??
-      frameSizeWarnings.flatMap((w, i) => (w && w !== 'no body pixels found' ? [i] : []));
+      indices ?? frameSizeWarnings.flatMap((w, i) => (w && w !== 'no body pixels found' ? [i] : []));
     if (targets.length === 0) return;
+    if (!anchorInfo || anchorInfo.bottomGap < 0) {
+      setAutoCleanMessage('Fix: the profile Anchor has no figure to line up with.');
+      return;
+    }
     setIsAutoCleaning(true);
     try {
-      const anchorHeight = await measureAnchorBodyHeight(activeProfile, config.frameWidth, config.frameHeight);
-      if (!(anchorHeight > 0)) {
-        setAutoCleanMessage('Size fix: the profile Anchor has no body-colored pixels to measure.');
-        return;
+      const moves = await proposeFeetAlignment(frames, activeProfile, anchorInfo, targets);
+      if (moves.length === 0) {
+        setAutoCleanMessage(
+          'Fix: the feet already line up with the anchor baseline, so nothing to move. Frames are never resized.'
+        );
+      } else {
+        setFeetConfirm(moves);
       }
-      const res = await fixFrameHeights(frames, activeProfile, anchorHeight, targets);
-      setAutoCleanMessage(formatHeightFixResults(res.results));
-      if (res.frames.some((f, i) => f !== frames[i])) applyFrameEdit(res.frames);
     } catch (err) {
-      console.error('Size fix failed:', err);
-      setError('Size fix failed: ' + (err instanceof Error ? err.message : String(err)));
+      console.error('Feet alignment failed:', err);
+      setError('Fix failed: ' + (err instanceof Error ? err.message : String(err)));
     } finally {
       setIsAutoCleaning(false);
     }
+  };
+
+  const handleConfirmFeetAlignment = async () => {
+    const moves = feetConfirm;
+    setFeetConfirm(null);
+    if (!moves) return;
+    const newFrames = await applyFeetAlignment(frames, moves);
+    const applied = moves.filter((m) => !m.blocked);
+    setAutoCleanMessage(
+      applied.length > 0
+        ? `Fix: moved ${applied.map((m) => `frame ${m.index + 1} ${m.dy > 0 ? 'down' : 'up'} ${Math.abs(m.dy)}px`).join(', ')} to the anchor baseline.`
+        : 'Fix: nothing moved (every move would have cut off pixels at the frame edge).'
+    );
+    if (newFrames.some((f, i) => f !== frames[i])) applyFrameEdit(newFrames);
   };
 
   /** Auto Clean a freshly generated animation if the profile asks for it (default on). */
@@ -350,29 +372,33 @@ export default function App() {
     }
   };
 
-  // Size check (report only): each frame's body height vs the profile Anchor's.
+  // The profile Anchor measured at true size (its own scale, e.g. 8x -> 24x24), once per profile.
+  const [anchorInfo, setAnchorInfo] = useState<AnchorMeasure | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    measureAnchor(activeProfile)
+      .then((m) => !cancelled && setAnchorInfo(m))
+      .catch(() => !cancelled && setAnchorInfo(null));
+    return () => {
+      cancelled = true;
+    };
+  }, [activeProfile]);
+
+  // Size check (report only): each frame's main-figure body height vs the anchor's (>1px flagged).
   const [frameSizeWarnings, setFrameSizeWarnings] = useState<Array<string | null>>([]);
   useEffect(() => {
-    if (config.type !== 'animation' || frames.length === 0) {
+    if (config.type !== 'animation' || frames.length === 0 || !anchorInfo) {
       setFrameSizeWarnings([]);
       return;
     }
     let cancelled = false;
-    (async () => {
-      try {
-        const [heights, anchorHeight] = await Promise.all([
-          measureBodyHeights(frames, activeProfile),
-          measureAnchorBodyHeight(activeProfile, config.frameWidth, config.frameHeight),
-        ]);
-        if (!cancelled) setFrameSizeWarnings(sizeCheck(heights, anchorHeight));
-      } catch (err) {
-        if (!cancelled) setFrameSizeWarnings([]);
-      }
-    })();
+    measureBodyHeights(frames, activeProfile)
+      .then((heights) => !cancelled && setFrameSizeWarnings(sizeCheck(heights, anchorInfo.bodyHeight)))
+      .catch(() => !cancelled && setFrameSizeWarnings([]));
     return () => {
       cancelled = true;
     };
-  }, [frames, activeProfile, config.type, config.frameWidth, config.frameHeight]);
+  }, [frames, activeProfile, anchorInfo, config.type]);
 
   // Auto-save: any change to the open asset (frames, cleaned sheet, name, fps) updates its library entry.
   useEffect(() => {
@@ -1326,6 +1352,7 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
                 onDuplicateProfile={handleDuplicateProfile}
                 onDeleteProfile={handleDeleteProfile}
                 onResetProfileToDefaults={handleResetProfileToDefaults}
+                anchorInfo={anchorInfo}
               />
             ) : (
               <AssetConfigPanel
@@ -1542,6 +1569,41 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
           onConfirm={(layout, name) => importRequest.resolve({ layout, name })}
           onSkip={() => importRequest.resolve(null)}
         />
+      )}
+
+      {/* Confirm feet alignment (moves only, never resizes) */}
+      {feetConfirm && (
+        <div className="fixed inset-0 z-50 bg-black/70 flex items-center justify-center p-4">
+          <div
+            role="dialog"
+            aria-modal="true"
+            data-testid="feet-align-dialog"
+            className="bg-zinc-900 border border-zinc-700 rounded-lg p-4 w-full max-w-sm space-y-3 text-sm text-zinc-200"
+          >
+            <p className="font-semibold text-zinc-100">Line up feet with the anchor baseline?</p>
+            <ul className="text-xs text-zinc-300 space-y-0.5 list-disc pl-4">
+              {feetConfirm.map((m) => (
+                <li key={m.index}>{describeFeetMove(m)}</li>
+              ))}
+            </ul>
+            <p className="text-[11px] text-zinc-500">Frames are only moved up or down, never resized. You can undo this.</p>
+            <div className="flex justify-end gap-2">
+              <button
+                onClick={() => setFeetConfirm(null)}
+                className="px-3 py-1.5 rounded bg-zinc-800 border border-zinc-700 text-zinc-300 hover:bg-zinc-700 text-xs"
+              >
+                Cancel
+              </button>
+              <button
+                onClick={handleConfirmFeetAlignment}
+                disabled={feetConfirm.every((m) => m.blocked)}
+                className="px-3 py-1.5 rounded bg-amber-500 text-zinc-950 hover:bg-amber-400 disabled:opacity-40 text-xs font-semibold"
+              >
+                Move frames
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Same-name dialog for new assets */}

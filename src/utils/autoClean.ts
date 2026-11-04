@@ -2,7 +2,7 @@
 // Same input pixels + same palette roles always give the same output. No randomness,
 // no model calls, no time-dependent logic (see CLAUDE.md).
 
-import { hexToRgb, colorDistance } from './pipeline';
+import { hexToRgb, colorDistance, keyOutMagentaData } from './pipeline';
 
 export type PaletteRole = 'body' | 'outline' | 'tool' | 'effect';
 export const PALETTE_ROLES: PaletteRole[] = ['body', 'outline', 'tool', 'effect'];
@@ -242,26 +242,72 @@ export function autoCleanPixels(
 }
 
 // ---------------------------------------------------------------------------
-// Size check (report only)
+// Size check (report only) and feet alignment (move only, never resize)
 // ---------------------------------------------------------------------------
 
-/** Body height: number of rows that contain at least one body-colored pixel (tools ignored). */
-export function bodyHeight(px: Uint8ClampedArray, w: number, h: number, roleOf: RoleOf): number {
-  let rows = 0;
-  for (let y = 0; y < h; y++) {
-    for (let x = 0; x < w; x++) {
-      if (roleAt(px, (y * w + x) * 4, roleOf) === 'body') {
-        rows++;
-        break;
+export interface FigureMeasure {
+  /** Rows that contain body-role pixels of the main figure. */
+  bodyHeight: number;
+  /** Lowest row of the main figure (body + outline), i.e. where the feet are. -1 if none. */
+  bottomRow: number;
+}
+
+/**
+ * Measure the main figure: 8-connected groups of body + outline pixels (tool and effect
+ * colors never join or count), keeping the group with the most body pixels. Detached
+ * body-colored pixels, such as light-grey smear trails, are ignored. Body height counts
+ * only rows containing body-role pixels of that group.
+ */
+export function measureFigure(px: Uint8ClampedArray, w: number, h: number, roleOf: RoleOf): FigureMeasure {
+  const label = new Int32Array(w * h).fill(-1);
+  const isFigure = (i: number) => {
+    const r = roleAt(px, i * 4, roleOf);
+    return r === 'body' || r === 'outline';
+  };
+  let best = { bodyPixels: 0, bodyRows: new Set<number>(), bottom: -1 };
+  let next = 0;
+  for (let start = 0; start < w * h; start++) {
+    if (label[start] !== -1 || !isFigure(start)) continue;
+    const id = next++;
+    const stack = [start];
+    label[start] = id;
+    let bodyPixels = 0;
+    let bottom = -1;
+    const bodyRows = new Set<number>();
+    while (stack.length) {
+      const i = stack.pop()!;
+      const x = i % w;
+      const y = (i - x) / w;
+      if (y > bottom) bottom = y;
+      if (roleAt(px, i * 4, roleOf) === 'body') {
+        bodyPixels++;
+        bodyRows.add(y);
+      }
+      for (const [dx, dy] of N8) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+        const j = ny * w + nx;
+        if (label[j] === -1 && isFigure(j)) {
+          label[j] = id;
+          stack.push(j);
+        }
       }
     }
+    // Most body pixels wins; ties keep the first group found (row-major), so it's deterministic.
+    if (bodyPixels > best.bodyPixels) best = { bodyPixels, bodyRows, bottom };
   }
-  return rows;
+  return { bodyHeight: best.bodyRows.size, bottomRow: best.bodyPixels > 0 ? best.bottom : -1 };
+}
+
+/** Body height of the main figure (see measureFigure). */
+export function bodyHeight(px: Uint8ClampedArray, w: number, h: number, roleOf: RoleOf): number {
+  return measureFigure(px, w, h, roleOf).bodyHeight;
 }
 
 /**
  * Compare each frame's body height to the anchor's. Returns a warning per frame
- * ("2px taller than anchor") or null when within `tolerance` pixels.
+ * ("2px taller than anchor") or null when within `tolerance` pixels (default 1).
  */
 export function sizeCheck(frameHeights: number[], anchorHeight: number, tolerance = 1): Array<string | null> {
   if (!(anchorHeight > 0)) return frameHeights.map(() => null);
@@ -274,100 +320,144 @@ export function sizeCheck(frameHeights: number[], anchorHeight: number, toleranc
 }
 
 // ---------------------------------------------------------------------------
-// Size fix: bring a frame's body height to the anchor's
+// Anchor at true size
 // ---------------------------------------------------------------------------
 
-export interface HeightFixResult {
-  pixels: Uint8ClampedArray;
-  /** Rows added (positive) or removed (negative). 0 when nothing changed. */
-  delta: number;
-  /** Why the frame was left alone, if it was. */
-  skipped?: string;
+function gcd(a: number, b: number): number {
+  while (b) [a, b] = [b, a % b];
+  return a;
 }
 
 /**
- * Make the body `targetHeight` rows tall by duplicating (too short) or removing (too tall)
- * whole rows inside the body, keeping the feet on the same bottom row and the width unchanged.
- *
- * Rows are chosen deterministically: only rows strictly inside the body (never its top or
- * bottom row), preferring "plain" rows (fewest interior outline / tool / effect pixels, so
- * eyes and held tools are left alone), then rows nearest the body's middle, then top-most.
- * Growing needs that many empty rows above the figure; otherwise the frame is skipped.
+ * Integer pixel scale of upscaled pixel art: the greatest common divisor of every run of
+ * identical pixels along rows and columns (all fully transparent pixels count as one
+ * color) and of the image size. An 8x reference gives 8; true-size art gives 1.
  */
-export function fixBodyHeight(
+export function detectIntegerScale(px: Uint8ClampedArray, w: number, h: number): number {
+  const same = (i: number, j: number) =>
+    (px[i + 3] === 0 && px[j + 3] === 0) ||
+    (px[i] === px[j] && px[i + 1] === px[j + 1] && px[i + 2] === px[j + 2] && px[i + 3] === px[j + 3]);
+  let g = gcd(w, h);
+  for (let y = 0; y < h && g > 1; y++) {
+    let run = 1;
+    for (let x = 1; x <= w; x++) {
+      if (x < w && same((y * w + x) * 4, (y * w + x - 1) * 4)) run++;
+      else {
+        g = gcd(g, run);
+        run = 1;
+      }
+    }
+  }
+  for (let x = 0; x < w && g > 1; x++) {
+    let run = 1;
+    for (let y = 1; y <= h; y++) {
+      if (y < h && same((y * w + x) * 4, ((y - 1) * w + x) * 4)) run++;
+      else {
+        g = gcd(g, run);
+        run = 1;
+      }
+    }
+  }
+  return Math.max(1, g);
+}
+
+/** Nearest-neighbor downscale by an integer factor (samples each block's center). */
+export function downscaleByInteger(
+  px: Uint8ClampedArray,
+  w: number,
+  h: number,
+  scale: number
+): { pixels: Uint8ClampedArray; width: number; height: number } {
+  if (scale <= 1) return { pixels: new Uint8ClampedArray(px), width: w, height: h };
+  const width = Math.floor(w / scale);
+  const height = Math.floor(h / scale);
+  const out = new Uint8ClampedArray(width * height * 4);
+  const off = Math.floor(scale / 2);
+  for (let y = 0; y < height; y++) {
+    for (let x = 0; x < width; x++) {
+      const si = ((y * scale + off) * w + (x * scale + off)) * 4;
+      out.set(px.subarray(si, si + 4), (y * width + x) * 4);
+    }
+  }
+  return { pixels: out, width, height };
+}
+
+export interface AnchorMeasure {
+  /** Detected integer scale of the stored reference (8 for a 192x192 reference of a 24x24 figure). */
+  scale: number;
+  /** True-size dimensions after downscaling. */
+  width: number;
+  height: number;
+  /** Body height of the main figure at true size. */
+  bodyHeight: number;
+  /** Empty rows between the feet and the bottom edge, at true size. -1 if no figure. */
+  bottomGap: number;
+}
+
+/**
+ * Measure the anchor at true size: key out magenta, detect its own integer scale
+ * (independent of the frame size being checked), downscale with nearest neighbor,
+ * then measure the main figure. If the image has no detectable scale but its size is
+ * an exact multiple of `hintFrame`, that multiple is used.
+ */
+export function measureAnchorPixels(
   src: Uint8ClampedArray,
   w: number,
   h: number,
   roleOf: RoleOf,
-  targetHeight: number
-): HeightFixResult {
-  const rowRoles: Array<Array<PaletteRole | null>> = [];
-  const bodyRows: number[] = [];
-  for (let y = 0; y < h; y++) {
-    const roles: Array<PaletteRole | null> = [];
-    let hasBody = false;
-    for (let x = 0; x < w; x++) {
-      const r = roleAt(src, (y * w + x) * 4, roleOf);
-      roles.push(r);
-      if (r === 'body') hasBody = true;
-    }
-    rowRoles.push(roles);
-    if (hasBody) bodyRows.push(y);
+  hintFrame?: { width: number; height: number },
+  magentaTolerance = 35
+): AnchorMeasure {
+  const px = new Uint8ClampedArray(src);
+  keyOutMagentaData(px, magentaTolerance);
+  let scale = detectIntegerScale(px, w, h);
+  if (scale === 1 && hintFrame && hintFrame.width > 0 && hintFrame.height > 0) {
+    const sx = w / hintFrame.width;
+    const sy = h / hintFrame.height;
+    if (Number.isInteger(sx) && sx === sy && sx > 1) scale = sx;
   }
-
-  const unchanged = (skipped?: string): HeightFixResult => ({ pixels: new Uint8ClampedArray(src), delta: 0, skipped });
-  if (bodyRows.length === 0) return unchanged('no body pixels found');
-  const diff = targetHeight - bodyRows.length;
-  if (diff === 0 || !(targetHeight > 0)) return unchanged();
-
-  const top = bodyRows[0];
-  const bottom = bodyRows[bodyRows.length - 1];
-  const center = (top + bottom) / 2;
-  // Interior body rows only, so the head top and feet rows keep their shape.
-  const candidates = bodyRows.filter((y) => y > top && y < bottom);
-
-  const score = (y: number) => {
-    const roles = rowRoles[y];
-    const first = roles.findIndex((r) => r !== null);
-    let last = -1;
-    for (let x = roles.length - 1; x >= 0; x--) {
-      if (roles[x] !== null) {
-        last = x;
-        break;
-      }
-    }
-    let s = 0;
-    for (let x = first + 1; x < last; x++) {
-      const r = roles[x];
-      if (r === 'outline' || r === 'tool' || r === 'effect') s++;
-    }
-    return s;
+  const small = downscaleByInteger(px, w, h, scale);
+  const m = measureFigure(small.pixels, small.width, small.height, roleOf);
+  return {
+    scale,
+    width: small.width,
+    height: small.height,
+    bodyHeight: m.bodyHeight,
+    bottomGap: m.bottomRow >= 0 ? small.height - 1 - m.bottomRow : -1,
   };
-  const ranked = [...candidates].sort(
-    (a, b) => score(a) - score(b) || Math.abs(a - center) - Math.abs(b - center) || a - b
-  );
-  const count = Math.abs(diff);
-  if (ranked.length < count) return unchanged(`body too small to ${diff > 0 ? 'stretch' : 'shrink'}`);
-  const chosen = new Set(ranked.slice(0, count));
+}
 
-  // Empty rows above the figure (anything opaque counts, tools included).
-  let emptyTop = 0;
-  while (emptyTop < h && rowRoles[emptyTop].every((r) => r === null)) emptyTop++;
-  if (diff > 0 && emptyTop < diff) return unchanged('no room above the head');
+/**
+ * Vertical move that puts a frame's feet on the anchor's baseline (same gap to the bottom
+ * edge as the anchor). 0 when already aligned or when there is no figure / anchor.
+ */
+export function feetAlignmentShift(
+  px: Uint8ClampedArray,
+  w: number,
+  h: number,
+  roleOf: RoleOf,
+  anchorBottomGap: number
+): number {
+  if (anchorBottomGap < 0) return 0;
+  const { bottomRow } = measureFigure(px, w, h, roleOf);
+  if (bottomRow < 0) return 0;
+  return h - 1 - anchorBottomGap - bottomRow;
+}
 
-  // New row order (source row indices), then bottom-align to keep the feet in place.
-  const order: number[] = [];
-  for (let y = 0; y < h; y++) {
-    if (diff < 0 && chosen.has(y)) continue;
-    order.push(y);
-    if (diff > 0 && chosen.has(y)) order.push(y);
-  }
+/**
+ * Move every pixel of a frame up (dy < 0) or down (dy > 0). Never resizes anything.
+ * Returns null if the move would push opaque pixels out of the frame.
+ */
+export function shiftFrameVertical(px: Uint8ClampedArray, w: number, h: number, dy: number): Uint8ClampedArray | null {
   const out = new Uint8ClampedArray(w * h * 4);
-  const shift = h - order.length; // >0 when rows were removed: pad transparent rows on top
-  for (let i = 0; i < order.length; i++) {
-    const dstY = i + shift;
-    if (dstY < 0 || dstY >= h) continue; // grown frames drop their (empty) top rows
-    out.set(src.subarray(order[i] * w * 4, (order[i] + 1) * w * 4), dstY * w * 4);
+  for (let y = 0; y < h; y++) {
+    const row = px.subarray(y * w * 4, (y + 1) * w * 4);
+    const ny = y + dy;
+    if (ny < 0 || ny >= h) {
+      for (let i = 3; i < row.length; i += 4) if (row[i] > 0) return null;
+      continue;
+    }
+    out.set(row, ny * w * 4);
   }
-  return { pixels: out, delta: diff };
+  return out;
 }
