@@ -28,6 +28,8 @@ import {
   measureBodyHeights,
   measureAnchorBodyHeight,
   formatAutoCleanStats,
+  fixFrameHeights,
+  formatHeightFixResults,
 } from './utils/autoCleanCanvas';
 import { sizeCheck } from './utils/autoClean';
 import { buildGenerationPrompt } from './utils/promptBuilder';
@@ -300,6 +302,30 @@ export default function App() {
     } catch (err) {
       console.error('Auto Clean failed:', err);
       setError('Auto Clean failed: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setIsAutoCleaning(false);
+    }
+  };
+
+  // Size fix (undoable): stretch / shrink flagged frames' body to the anchor's height.
+  const handleFixSizes = async (indices?: number[]) => {
+    const targets =
+      indices ??
+      frameSizeWarnings.flatMap((w, i) => (w && w !== 'no body pixels found' ? [i] : []));
+    if (targets.length === 0) return;
+    setIsAutoCleaning(true);
+    try {
+      const anchorHeight = await measureAnchorBodyHeight(activeProfile, config.frameWidth, config.frameHeight);
+      if (!(anchorHeight > 0)) {
+        setAutoCleanMessage('Size fix: the profile Anchor has no body-colored pixels to measure.');
+        return;
+      }
+      const res = await fixFrameHeights(frames, activeProfile, anchorHeight, targets);
+      setAutoCleanMessage(formatHeightFixResults(res.results));
+      if (res.frames.some((f, i) => f !== frames[i])) applyFrameEdit(res.frames);
+    } catch (err) {
+      console.error('Size fix failed:', err);
+      setError('Size fix failed: ' + (err instanceof Error ? err.message : String(err)));
     } finally {
       setIsAutoCleaning(false);
     }
@@ -1429,6 +1455,7 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
                 onUndo={handleUndoFrameEdit}
                 canUndo={frameUndoStack.length > 0}
                 frameWarnings={frameSizeWarnings}
+                onFixSize={handleFixSizes}
                 onEditFrame={(idx) => {
                   setEditingFrameIndex(idx);
                   setPixelEditorOpen(true);

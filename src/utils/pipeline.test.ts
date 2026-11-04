@@ -766,3 +766,55 @@ test('touch-up file names round-trip', async () => {
   assert.equal(parseTouchUpFileName('walk_row.png'), null);
   assert.equal(parseTouchUpFileName('fig_x_0x24_5f.png'), null);
 });
+
+test('fixBodyHeight stretches a short body / shrinks a tall one, feet stay on the baseline', async () => {
+  const { fixBodyHeight, bodyHeight } = await import('./autoClean.ts');
+  const { roleOf } = await characterRoleOf();
+  // Body rows 2..6 (5 tall) with outline sides; eye row has an interior outline pixel.
+  const short = frameFromRows([
+    '.......',
+    '.OOOOO.',
+    '.OBBBO.',
+    '.OBOBO.', // eyes: interior outline -> avoided
+    '.OBBBO.',
+    '.OBBBO.',
+    '.OBBBO.',
+    '.OOOOO.',
+  ]);
+  assert.equal(bodyHeight(short.px, short.w, short.h, roleOf), 5);
+
+  // Too short by 1 (anchor 6): one plain interior row duplicated, feet row unchanged
+  const grown = fixBodyHeight(short.px, short.w, short.h, roleOf, 6);
+  assert.equal(grown.delta, 1);
+  assert.equal(bodyHeight(grown.pixels, short.w, short.h, roleOf), 6);
+  assert.deepEqual(rowsFromFrame(grown.pixels, short.w, short.h), [
+    '.OOOOO.',
+    '.OBBBO.',
+    '.OBOBO.',
+    '.OBBBO.',
+    '.OBBBO.', // duplicated row nearest the middle among plain rows
+    '.OBBBO.',
+    '.OBBBO.',
+    '.OOOOO.',
+  ]);
+
+  // Too tall by 2 (anchor 3): two plain rows removed, transparent rows padded on top
+  const shrunk = fixBodyHeight(short.px, short.w, short.h, roleOf, 3);
+  assert.equal(shrunk.delta, -2);
+  const rows = rowsFromFrame(shrunk.pixels, short.w, short.h);
+  assert.equal(bodyHeight(shrunk.pixels, short.w, short.h, roleOf), 3);
+  assert.equal(rows[7], '.OOOOO.'); // feet row still at the bottom
+  assert.ok(rows.includes('.OBOBO.')); // eye row kept
+  assert.deepEqual(rows.slice(0, 3), ['.......', '.......', '.......']);
+
+  // Not enough empty space above the head to grow by 2: left alone
+  const noRoom = fixBodyHeight(short.px, short.w, short.h, roleOf, 7);
+  assert.equal(noRoom.delta, 0);
+  assert.equal(noRoom.skipped, 'no room above the head');
+
+  // Deterministic
+  assert.deepEqual(
+    Array.from(fixBodyHeight(short.px, short.w, short.h, roleOf, 6).pixels),
+    Array.from(grown.pixels)
+  );
+});

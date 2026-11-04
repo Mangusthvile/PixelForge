@@ -44,6 +44,8 @@ interface AnimationPreviewProps {
   canUndo?: boolean;
   /** Per-frame size check result, e.g. "2px taller than anchor" (null = fine). */
   frameWarnings?: Array<string | null>;
+  /** Fix flagged frames' body height to the anchor's; no indices = all flagged frames. */
+  onFixSize?: (indices?: number[]) => void;
 }
 
 export const AnimationPreview: React.FC<AnimationPreviewProps> = ({
@@ -68,7 +70,9 @@ export const AnimationPreview: React.FC<AnimationPreviewProps> = ({
   onUndo,
   canUndo,
   frameWarnings,
+  onFixSize,
 }) => {
+  const flaggedCount = (frameWarnings || []).filter((w) => w && w !== 'no body pixels found').length;
   const [currentFrameIndex, setCurrentFrameIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(true);
   const [zoomLevel, setZoomLevel] = useState(6);
@@ -398,6 +402,17 @@ export const AnimationPreview: React.FC<AnimationPreviewProps> = ({
                 <span>Undo</span>
               </button>
             )}
+            {onFixSize && flaggedCount > 0 && (
+              <button
+                onClick={() => onFixSize()}
+                disabled={isAutoCleaning}
+                data-testid="fix-sizes"
+                className="flex items-center gap-1 px-2 py-0.5 rounded bg-amber-500/15 border border-amber-500/40 text-[11px] text-amber-300 hover:bg-amber-500/25 disabled:opacity-50"
+                title="Stretch or shrink flagged frames' body to the anchor's height (undoable)"
+              >
+                <span>Fix sizes ({flaggedCount})</span>
+              </button>
+            )}
             {onAutoClean && (
               <button
                 onClick={onAutoClean}
@@ -472,10 +487,24 @@ export const AnimationPreview: React.FC<AnimationPreviewProps> = ({
                 {frameWarnings?.[idx] && (
                   <span
                     data-testid={`size-warning-${idx}`}
-                    className="max-w-[80px] text-center text-[9px] leading-tight px-1 py-0.5 rounded bg-amber-500/15 border border-amber-500/40 text-amber-300"
+                    className="max-w-[84px] text-center text-[9px] leading-tight px-1 py-0.5 rounded bg-amber-500/15 border border-amber-500/40 text-amber-300"
                     title="Body height compared to the profile Anchor (tools ignored)"
                   >
                     {frameWarnings[idx]}
+                    {onFixSize && frameWarnings[idx] !== 'no body pixels found' && (
+                      <button
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onFixSize([idx]);
+                        }}
+                        disabled={isAutoCleaning}
+                        data-testid={`fix-size-${idx}`}
+                        className="ml-1 underline font-semibold hover:text-amber-100 disabled:opacity-50"
+                        title="Stretch or shrink this frame's body to the anchor's height (undoable)"
+                      >
+                        Fix
+                      </button>
+                    )}
                   </span>
                 )}
 

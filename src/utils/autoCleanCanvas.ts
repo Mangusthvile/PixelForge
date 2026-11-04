@@ -6,6 +6,7 @@ import {
   AutoCleanStats,
   autoCleanPixels,
   bodyHeight,
+  fixBodyHeight,
   makeRoleLookup,
   resolvePaletteRoles,
   RoleOf,
@@ -108,4 +109,36 @@ export function formatAutoCleanStats(s: AutoCleanStats): string {
     s.pinholes ? `filled ${s.pinholes} pinhole${s.pinholes === 1 ? '' : 's'}` : '',
   ].filter(Boolean);
   return parts.length ? `Auto Clean: ${parts.join(', ')}.` : 'Auto Clean: nothing to fix.';
+}
+
+/**
+ * Bring the given frames' body height to the anchor's (see fixBodyHeight).
+ * Returns new frame URLs plus a per-frame result for reporting.
+ */
+export async function fixFrameHeights(
+  frames: string[],
+  profile: StyleProfile,
+  anchorHeight: number,
+  indices: number[]
+): Promise<{ frames: string[]; results: Array<{ index: number; delta: number; skipped?: string }> }> {
+  const roleOf = roleLookupFor(profile);
+  const out = [...frames];
+  const results: Array<{ index: number; delta: number; skipped?: string }> = [];
+  for (const index of indices) {
+    if (!frames[index]) continue;
+    const img = await readPixels(frames[index]);
+    const res = fixBodyHeight(img.pixels, img.width, img.height, roleOf, anchorHeight);
+    if (res.delta !== 0) out[index] = pixelsToDataUrl({ pixels: res.pixels, width: img.width, height: img.height });
+    results.push({ index, delta: res.delta, skipped: res.skipped });
+  }
+  return { frames: out, results };
+}
+
+export function formatHeightFixResults(results: Array<{ index: number; delta: number; skipped?: string }>): string {
+  const parts = results.map((r) =>
+    r.delta !== 0
+      ? `frame ${r.index + 1} ${r.delta > 0 ? '+' : '−'}${Math.abs(r.delta)}px`
+      : `frame ${r.index + 1} skipped (${r.skipped || 'already matches'})`
+  );
+  return parts.length ? `Size fix: ${parts.join(', ')}.` : 'Size fix: no frames to fix.';
 }

@@ -272,3 +272,102 @@ export function sizeCheck(frameHeights: number[], anchorHeight: number, toleranc
     return `${Math.abs(diff)}px ${diff > 0 ? 'taller' : 'shorter'} than anchor`;
   });
 }
+
+// ---------------------------------------------------------------------------
+// Size fix: bring a frame's body height to the anchor's
+// ---------------------------------------------------------------------------
+
+export interface HeightFixResult {
+  pixels: Uint8ClampedArray;
+  /** Rows added (positive) or removed (negative). 0 when nothing changed. */
+  delta: number;
+  /** Why the frame was left alone, if it was. */
+  skipped?: string;
+}
+
+/**
+ * Make the body `targetHeight` rows tall by duplicating (too short) or removing (too tall)
+ * whole rows inside the body, keeping the feet on the same bottom row and the width unchanged.
+ *
+ * Rows are chosen deterministically: only rows strictly inside the body (never its top or
+ * bottom row), preferring "plain" rows (fewest interior outline / tool / effect pixels, so
+ * eyes and held tools are left alone), then rows nearest the body's middle, then top-most.
+ * Growing needs that many empty rows above the figure; otherwise the frame is skipped.
+ */
+export function fixBodyHeight(
+  src: Uint8ClampedArray,
+  w: number,
+  h: number,
+  roleOf: RoleOf,
+  targetHeight: number
+): HeightFixResult {
+  const rowRoles: Array<Array<PaletteRole | null>> = [];
+  const bodyRows: number[] = [];
+  for (let y = 0; y < h; y++) {
+    const roles: Array<PaletteRole | null> = [];
+    let hasBody = false;
+    for (let x = 0; x < w; x++) {
+      const r = roleAt(src, (y * w + x) * 4, roleOf);
+      roles.push(r);
+      if (r === 'body') hasBody = true;
+    }
+    rowRoles.push(roles);
+    if (hasBody) bodyRows.push(y);
+  }
+
+  const unchanged = (skipped?: string): HeightFixResult => ({ pixels: new Uint8ClampedArray(src), delta: 0, skipped });
+  if (bodyRows.length === 0) return unchanged('no body pixels found');
+  const diff = targetHeight - bodyRows.length;
+  if (diff === 0 || !(targetHeight > 0)) return unchanged();
+
+  const top = bodyRows[0];
+  const bottom = bodyRows[bodyRows.length - 1];
+  const center = (top + bottom) / 2;
+  // Interior body rows only, so the head top and feet rows keep their shape.
+  const candidates = bodyRows.filter((y) => y > top && y < bottom);
+
+  const score = (y: number) => {
+    const roles = rowRoles[y];
+    const first = roles.findIndex((r) => r !== null);
+    let last = -1;
+    for (let x = roles.length - 1; x >= 0; x--) {
+      if (roles[x] !== null) {
+        last = x;
+        break;
+      }
+    }
+    let s = 0;
+    for (let x = first + 1; x < last; x++) {
+      const r = roles[x];
+      if (r === 'outline' || r === 'tool' || r === 'effect') s++;
+    }
+    return s;
+  };
+  const ranked = [...candidates].sort(
+    (a, b) => score(a) - score(b) || Math.abs(a - center) - Math.abs(b - center) || a - b
+  );
+  const count = Math.abs(diff);
+  if (ranked.length < count) return unchanged(`body too small to ${diff > 0 ? 'stretch' : 'shrink'}`);
+  const chosen = new Set(ranked.slice(0, count));
+
+  // Empty rows above the figure (anything opaque counts, tools included).
+  let emptyTop = 0;
+  while (emptyTop < h && rowRoles[emptyTop].every((r) => r === null)) emptyTop++;
+  if (diff > 0 && emptyTop < diff) return unchanged('no room above the head');
+
+  // New row order (source row indices), then bottom-align to keep the feet in place.
+  const order: number[] = [];
+  for (let y = 0; y < h; y++) {
+    if (diff < 0 && chosen.has(y)) continue;
+    order.push(y);
+    if (diff > 0 && chosen.has(y)) order.push(y);
+  }
+  const out = new Uint8ClampedArray(w * h * 4);
+  const shift = h - order.length; // >0 when rows were removed: pad transparent rows on top
+  for (let i = 0; i < order.length; i++) {
+    const dstY = i + shift;
+    if (dstY < 0 || dstY >= h) continue; // grown frames drop their (empty) top rows
+    out.set(src.subarray(order[i] * w * 4, (order[i] + 1) * w * 4), dstY * w * 4);
+  }
+  return { pixels: out, delta: diff };
+}
