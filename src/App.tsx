@@ -33,7 +33,7 @@ import {
   describeFeetMove,
   FeetMove,
 } from './utils/autoCleanCanvas';
-import { AnchorMeasure } from './utils/autoClean';
+import { AnchorMeasure, consistencyCheck } from './utils/autoClean';
 import { sizeCheck } from './utils/autoClean';
 import { buildGenerationPrompt } from './utils/promptBuilder';
 import {
@@ -384,17 +384,29 @@ export default function App() {
     };
   }, [activeProfile]);
 
-  // Size check (report only): each frame's main-figure body height vs the anchor's (>1px flagged).
+  // Size checks (report only), >1px flagged:
+  //  - each frame's main-figure body height vs the anchor's
+  //  - each frame vs the other frames ("frame drawn 4px taller than the others")
   const [frameSizeWarnings, setFrameSizeWarnings] = useState<Array<string | null>>([]);
+  const [frameConsistencyWarnings, setFrameConsistencyWarnings] = useState<Array<string | null>>([]);
   useEffect(() => {
-    if (config.type !== 'animation' || frames.length === 0 || !anchorInfo) {
+    if (config.type !== 'animation' || frames.length === 0) {
       setFrameSizeWarnings([]);
+      setFrameConsistencyWarnings([]);
       return;
     }
     let cancelled = false;
     measureBodyHeights(frames, activeProfile)
-      .then((heights) => !cancelled && setFrameSizeWarnings(sizeCheck(heights, anchorInfo.bodyHeight)))
-      .catch(() => !cancelled && setFrameSizeWarnings([]));
+      .then((heights) => {
+        if (cancelled) return;
+        setFrameSizeWarnings(anchorInfo ? sizeCheck(heights, anchorInfo.bodyHeight) : heights.map(() => null));
+        setFrameConsistencyWarnings(consistencyCheck(heights));
+      })
+      .catch(() => {
+        if (cancelled) return;
+        setFrameSizeWarnings([]);
+        setFrameConsistencyWarnings([]);
+      });
     return () => {
       cancelled = true;
     };
@@ -1482,6 +1494,7 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
                 onUndo={handleUndoFrameEdit}
                 canUndo={frameUndoStack.length > 0}
                 frameWarnings={frameSizeWarnings}
+                frameNotes={frameConsistencyWarnings}
                 onFixSize={handleFixSizes}
                 onEditFrame={(idx) => {
                   setEditingFrameIndex(idx);

@@ -639,7 +639,8 @@ test('palette roles: Characters defaults and explicit per-swatch roles', async (
 test('removeOrphanOutline removes unsupported outline pixels until nothing changes', async () => {
   const { removeOrphanOutline } = await import('./autoClean.ts');
   const { roleOf } = await characterRoleOf();
-  // Outline pixels with no body/tool neighbor: the pair at the top right and the corner pixel.
+  // The detached pair at the top right is removed. The corner pixel touches the figure's
+  // outline diagonally, so it is part of a long connected outline and is kept.
   const f = frameFromRows([
     '.....OO',
     '.OOO...',
@@ -653,12 +654,19 @@ test('removeOrphanOutline removes unsupported outline pixels until nothing chang
     '.OOO...',
     '.OBO...',
     '.OOO...',
-    '.......',
+    'O......',
   ]);
-  assert.equal(removed, 3);
+  assert.equal(removed, 2);
 
-  // Only the outline pixel touching the body survives a stray outline line
-  const chain = frameFromRows(['BOOOO']);
+  // A connected outline longer than 3 pixels is never removed, even with no body next to it
+  const line = frameFromRows(['BOOOO', '.....', 'OOOO.']);
+  assert.deepEqual(rowsFromFrame(removeOrphanOutline(line.px, line.w, line.h, roleOf).pixels, 5, 3), [
+    'BOOOO',
+    '.....',
+    'OOOO.',
+  ]);
+  // Short groups (<= 3) without support are removed; the pixel touching the body stays
+  const chain = frameFromRows(['BOO.O']);
   const res = removeOrphanOutline(chain.px, chain.w, chain.h, roleOf);
   assert.deepEqual(rowsFromFrame(res.pixels, chain.w, chain.h), ['BO...']);
 
@@ -708,26 +716,26 @@ test('autoCleanPixels is deterministic and reports what it changed', async () =>
   const { autoCleanPixels } = await import('./autoClean.ts');
   const { roleOf } = await characterRoleOf();
   const f = frameFromRows([
-    'O......',
-    '.OOOOO.',
-    '.OBBBO.',
-    '.OB.BO.',
-    '.OBBBO.',
-    '.OOOOO.',
-    '......T',
+    'O.......',
+    '..OOOOO.',
+    '..OBBBO.',
+    '..OB.BO.',
+    '..OBBBO.',
+    '..OOOOO.',
+    '.......T',
   ]);
   const a = autoCleanPixels(f.px, f.w, f.h, roleOf);
   const b = autoCleanPixels(f.px, f.w, f.h, roleOf);
   assert.deepEqual(Array.from(a.pixels), Array.from(b.pixels));
   assert.deepEqual(a.stats, { orphanOutline: 1, specks: 1, pinholes: 1 });
   assert.deepEqual(rowsFromFrame(a.pixels, f.w, f.h), [
-    '.......',
-    '.OOOOO.',
-    '.OBBBO.',
-    '.OBBBO.',
-    '.OBBBO.',
-    '.OOOOO.',
-    '.......',
+    '........',
+    '..OOOOO.',
+    '..OBBBO.',
+    '..OBBBO.',
+    '..OBBBO.',
+    '..OOOOO.',
+    '........',
   ]);
 });
 
@@ -861,4 +869,91 @@ test('Fix only moves frames to the anchor baseline, never resizes', async () => 
   assert.equal(feetAlignmentShift(ok.px, ok.w, ok.h, roleOf, 2), 0);
   // A move that would cut off pixels at the edge is refused
   assert.equal(shiftFrameVertical(ok.px, ok.w, ok.h, 3), null);
+});
+
+/** Raw "model output": magenta, 3x2 cells of 96px with black 4px dividers, one figure per cell. */
+function gridWithDividers(opts: { cols: number; rows: number; cell: number; line: number; lineColor: [number, number, number] }) {
+  const { cols, rows, cell, line, lineColor } = opts;
+  const w = cols * cell + (cols - 1) * line;
+  const h = rows * cell + (rows - 1) * line;
+  const px = new Uint8ClampedArray(w * h * 4);
+  for (let i = 0; i < w * h; i++) px.set([255, 0, 255, 255], i * 4);
+  const fill = (x0: number, y0: number, fw: number, fh: number, c: number[]) => {
+    for (let y = y0; y < y0 + fh; y++) for (let x = x0; x < x0 + fw; x++) px.set([c[0], c[1], c[2], 255], (y * w + x) * 4);
+  };
+  for (let c = 1; c < cols; c++) fill(c * (cell + line) - line, 0, line, h, lineColor);
+  for (let r = 1; r < rows; r++) fill(0, r * (cell + line) - line, w, line, lineColor);
+  const cellOrigins: Array<{ x: number; y: number }> = [];
+  for (let r = 0; r < rows; r++) {
+    for (let c = 0; c < cols; c++) {
+      const x = c * (cell + line);
+      const y = r * (cell + line);
+      cellOrigins.push({ x, y });
+      // Figure: dark outline box with a white body, placed off-center (left part of the cell)
+      const fx = Math.round(cell * 0.15), fy = Math.round(cell * 0.17);
+      const fw = Math.round(cell * 0.35), fh = Math.round(cell * 0.75); // 14, 16, 34, 72 for 96px cells
+      fill(x + fx, y + fy, fw, fh, [43, 43, 43]);
+      fill(x + fx + 4, y + fy + 4, fw - 8, fh - 8, [255, 255, 255]);
+    }
+  }
+  return { px, w, h, cellOrigins };
+}
+
+test('Template Fill: black 4px dividers are found, blanked, and set the cell boundaries', async () => {
+  const { findDividers, blankDividers, cellsFromDividers, detectGrid } = await import('./gridLayout.ts');
+  const { keyOutMagentaData } = await import('./pipeline.ts');
+  const g = gridWithDividers({ cols: 3, rows: 2, cell: 96, line: 4, lineColor: [0, 0, 0] });
+
+  // Without handling dividers, magenta-gutter detection can't see the cells (lines join everything)
+  const naive = new Uint8ClampedArray(g.px);
+  keyOutMagentaData(naive, 35);
+  const naiveGrid = detectGrid(naive, g.w, g.h);
+  assert.notDeepEqual([naiveGrid.cols, naiveGrid.rows], [3, 2]);
+
+  // Dividers: two 4px columns, one 4px row
+  const d = findDividers(g.px, g.w, g.h, { outlineColor: '#2b2b2b' });
+  assert.deepEqual(d.cols, [{ start: 96, end: 99 }, { start: 196, end: 199 }]);
+  assert.deepEqual(d.rows, [{ start: 96, end: 99 }]);
+
+  // They become gutters, and the grid reads 3x2 again
+  const px = new Uint8ClampedArray(g.px);
+  blankDividers(px, g.w, g.h, d);
+  keyOutMagentaData(px, 35);
+  const fixed = detectGrid(px, g.w, g.h);
+  assert.deepEqual([fixed.cols, fixed.rows], [3, 2]);
+
+  // Cell boundaries come from the dividers (not from an evenly split computed grid)
+  const cells = cellsFromDividers(d, g.w, g.h, { xs: [], ys: [] });
+  assert.deepEqual([cells.cols, cells.rows], [3, 2]);
+  assert.deepEqual(cells.rects[0], { x: 0, y: 0, w: 96, h: 96 });
+  assert.deepEqual(cells.rects[4], { x: 100, y: 100, w: 96, h: 96 });
+  // Each cell contains exactly its own figure, wholly
+  cells.rects.forEach((r, i) => {
+    const o = g.cellOrigins[i];
+    assert.ok(r.x <= o.x + 14 && o.x + 48 <= r.x + r.w && r.y <= o.y + 16 && o.y + 88 <= r.y + r.h, `cell ${i}`);
+  });
+
+  // Faint #E000E0 guide lines of real thickness count too; a 1px line (< 1% of the image) does not
+  const guide = gridWithDividers({ cols: 3, rows: 2, cell: 96, line: 4, lineColor: [224, 0, 224] });
+  assert.equal(findDividers(guide.px, guide.w, guide.h).cols.length, 2);
+  const thin = gridWithDividers({ cols: 3, rows: 2, cell: 96, line: 1, lineColor: [0, 0, 0] });
+  assert.deepEqual(findDividers(thin.px, thin.w, thin.h), { rows: [], cols: [] });
+
+  // A model that drew 4x3 with dividers reports 4x3 (mismatch is then shown to the user)
+  const wrong = gridWithDividers({ cols: 4, rows: 3, cell: 72, line: 4, lineColor: [0, 0, 0] });
+  const wc = cellsFromDividers(findDividers(wrong.px, wrong.w, wrong.h), wrong.w, wrong.h, { xs: [], ys: [] });
+  assert.deepEqual([wc.cols, wc.rows], [4, 3]);
+});
+
+test('frames whose body height differs from the others by more than 1px are flagged', async () => {
+  const { consistencyCheck } = await import('./autoClean.ts');
+  assert.deepEqual(consistencyCheck([15, 15, 19, 15, 14]), [
+    null,
+    null,
+    'frame drawn 4px taller than the others',
+    null,
+    null,
+  ]);
+  assert.deepEqual(consistencyCheck([15, 12, 15, 0]), [null, 'frame drawn 3px shorter than the others', null, null]);
+  assert.deepEqual(consistencyCheck([15]), [null]);
 });

@@ -543,3 +543,126 @@ export function detectedCellRects(detected: DetectedGrid, width: number, height:
   }
   return rects;
 }
+
+// ---------------------------------------------------------------------------
+// Divider lines (model drew solid grid lines instead of leaving magenta gutters)
+// ---------------------------------------------------------------------------
+
+export interface Dividers {
+  /** Horizontal divider runs (row ranges). */
+  rows: Band[];
+  /** Vertical divider runs (column ranges). */
+  cols: Band[];
+}
+
+export interface DividerOptions {
+  /** Pixels this dark or darker count as divider pixels (default: the outline color). */
+  outlineColor?: string;
+  /** Faint guide color the template uses. */
+  guideColor?: string;
+  /** Share of a full row/column that must be divider pixels. */
+  minFraction?: number;
+  /** Minimum run thickness as a share of the image size along that axis. */
+  minThicknessFraction?: number;
+}
+
+const luminance = (r: number, g: number, b: number) => 0.299 * r + 0.587 * g + 0.114 * b;
+
+function hexRgb(hex: string): [number, number, number] {
+  const c = hex.replace('#', '');
+  return [parseInt(c.slice(0, 2), 16), parseInt(c.slice(2, 4), 16), parseInt(c.slice(4, 6), 16)];
+}
+
+/**
+ * Find full-width rows and full-height columns where more than 85% of pixels are dark
+ * (outline color or darker) or the guide color, in runs at least 1% of the image size thick.
+ * Works on the raw model output, before magenta keying.
+ */
+export function findDividers(px: Uint8ClampedArray, w: number, h: number, opts: DividerOptions = {}): Dividers {
+  const [or, og, ob] = hexRgb(opts.outlineColor || '#2b2b2b');
+  const [gr, gg, gb] = hexRgb(opts.guideColor || '#e000e0');
+  const darkLimit = luminance(or, og, ob) + 16; // small margin for compression noise
+  const minFraction = opts.minFraction ?? 0.85;
+  const minThick = opts.minThicknessFraction ?? 0.01;
+
+  const isDivider = (i: number) => {
+    if (px[i + 3] === 0) return false;
+    const r = px[i], g = px[i + 1], b = px[i + 2];
+    if (luminance(r, g, b) <= darkLimit) return true;
+    return Math.abs(r - gr) <= 24 && Math.abs(g - gg) <= 24 && Math.abs(b - gb) <= 24;
+  };
+
+  const rowHits = new Array<boolean>(h).fill(false);
+  for (let y = 0; y < h; y++) {
+    let n = 0;
+    for (let x = 0; x < w; x++) if (isDivider((y * w + x) * 4)) n++;
+    rowHits[y] = n > minFraction * w;
+  }
+  const colHits = new Array<boolean>(w).fill(false);
+  for (let x = 0; x < w; x++) {
+    let n = 0;
+    for (let y = 0; y < h; y++) if (isDivider((y * w + x) * 4)) n++;
+    colHits[x] = n > minFraction * h;
+  }
+
+  const runs = (hits: boolean[], size: number): Band[] => {
+    const out: Band[] = [];
+    let i = 0;
+    while (i < hits.length) {
+      if (!hits[i]) {
+        i++;
+        continue;
+      }
+      const start = i;
+      while (i < hits.length && hits[i]) i++;
+      if (i - start >= minThick * size) out.push({ start, end: i - 1 });
+    }
+    return out;
+  };
+  return { rows: runs(rowHits, h), cols: runs(colHits, w) };
+}
+
+/** Make divider pixels transparent so they act as gutters (mutates `px`). */
+export function blankDividers(px: Uint8ClampedArray, w: number, h: number, d: Dividers): void {
+  for (const band of d.rows) {
+    for (let y = band.start; y <= band.end; y++) for (let x = 0; x < w; x++) px[(y * w + x) * 4 + 3] = 0;
+  }
+  for (const band of d.cols) {
+    for (let x = band.start; x <= band.end; x++) for (let y = 0; y < h; y++) px[(y * w + x) * 4 + 3] = 0;
+  }
+}
+
+/**
+ * Segments between dividers along one axis. Thin leftovers (under half the median segment,
+ * e.g. a sliver outside an outer border line) are dropped.
+ */
+export function segmentsBetween(dividers: Band[], size: number): Band[] {
+  const segs: Band[] = [];
+  let cursor = 0;
+  for (const d of dividers) {
+    if (d.start > cursor) segs.push({ start: cursor, end: d.start - 1 });
+    cursor = d.end + 1;
+  }
+  if (cursor < size) segs.push({ start: cursor, end: size - 1 });
+  if (segs.length <= 1) return segs;
+  const lengths = segs.map((s) => s.end - s.start + 1).sort((a, b) => a - b);
+  const median = lengths[Math.floor(lengths.length / 2)];
+  return segs.filter((s) => s.end - s.start + 1 >= median / 2);
+}
+
+/**
+ * Cell rectangles (reading order) from divider lines. An axis without dividers uses
+ * `fallback` segments (e.g. the computed template cells) for that axis.
+ */
+export function cellsFromDividers(
+  d: Dividers,
+  w: number,
+  h: number,
+  fallback: { xs: Band[]; ys: Band[] }
+): { cols: number; rows: number; rects: CellRect[] } {
+  const xs = d.cols.length > 0 ? segmentsBetween(d.cols, w) : fallback.xs;
+  const ys = d.rows.length > 0 ? segmentsBetween(d.rows, h) : fallback.ys;
+  const rects: CellRect[] = [];
+  for (const y of ys) for (const x of xs) rects.push({ x: x.start, y: y.start, w: x.end - x.start + 1, h: y.end - y.start + 1 });
+  return { cols: xs.length, rows: ys.length, rects };
+}

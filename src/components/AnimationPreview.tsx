@@ -44,6 +44,8 @@ interface AnimationPreviewProps {
   canUndo?: boolean;
   /** Per-frame size check result, e.g. "2px taller than anchor" (null = fine). */
   frameWarnings?: Array<string | null>;
+  /** Per-frame consistency result vs the other frames (report only). */
+  frameNotes?: Array<string | null>;
   /** Fix flagged frames' body height to the anchor's; no indices = all flagged frames. */
   onFixSize?: (indices?: number[]) => void;
 }
@@ -70,6 +72,7 @@ export const AnimationPreview: React.FC<AnimationPreviewProps> = ({
   onUndo,
   canUndo,
   frameWarnings,
+  frameNotes,
   onFixSize,
 }) => {
   const flaggedCount = (frameWarnings || []).filter((w) => w && w !== 'no body pixels found').length;
@@ -482,6 +485,17 @@ export const AnimationPreview: React.FC<AnimationPreviewProps> = ({
                     className="max-w-full max-h-full object-contain [image-rendering:pixelated]"
                   />
                 </div>
+
+                {/* Consistency badge: this frame vs the others */}
+                {frameNotes?.[idx] && (
+                  <span
+                    data-testid={`consistency-warning-${idx}`}
+                    className="max-w-[84px] text-center text-[9px] leading-tight px-1 py-0.5 rounded bg-sky-500/15 border border-sky-500/40 text-sky-300"
+                    title="Body height compared to the median of all frames"
+                  >
+                    {frameNotes[idx]}
+                  </span>
+                )}
 
                 {/* Size check badge */}
                 {frameWarnings?.[idx] && (

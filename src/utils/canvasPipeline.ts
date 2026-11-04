@@ -21,6 +21,9 @@ import {
   detectGrid,
   gridMatchesRequested,
   detectedCellRects,
+  findDividers,
+  blankDividers,
+  cellsFromDividers,
   CellRect,
   TEMPLATE_SCALE,
 } from './gridLayout';
@@ -50,6 +53,8 @@ export interface GridCheck {
   usedDetected: boolean;
   /** True when slicing was held back because the grids don't match (no frames returned). */
   blocked: boolean;
+  /** How the drawn grid was found: solid divider lines, or magenta gutters between figures. */
+  source: 'dividers' | 'gutters';
 }
 
 export async function runCleanupPipeline(
@@ -133,6 +138,28 @@ export async function runCleanupPipeline(
   let curW = rawW;
   let curH = rawH;
 
+  // Step A0 (Template Fill): the model sometimes draws solid dark grid lines instead of keeping
+  // magenta gutters. Find full-width/height divider lines on the raw image, blank them so they
+  // act as gutters, and use them as the cell boundaries (in raw pixels, mapped to sprite pixels
+  // below). Axes without dividers fall back to the computed template cells.
+  let dividerGrid: { cols: number; rows: number; rects: CellRect[] } | null = null;
+  if (templateLayout) {
+    const dividers = findDividers(curPixels, rawW, rawH, { outlineColor: profile.outlineColor });
+    if (dividers.rows.length > 0 || dividers.cols.length > 0) {
+      blankDividers(curPixels, rawW, rawH, dividers);
+      const sx = rawW / templateLayout.canvasW;
+      const sy = rawH / templateLayout.canvasH;
+      const span = (start: number, size: number, scale: number) => ({
+        start: Math.round(start * scale),
+        end: Math.round((start + size) * scale) - 1,
+      });
+      dividerGrid = cellsFromDividers(dividers, rawW, rawH, {
+        xs: Array.from({ length: cols }, (_, c) => span(templateLayout.offsetX + c * templateLayout.cellW, templateLayout.cellW, sx)),
+        ys: Array.from({ length: rows }, (_, r) => span(templateLayout.offsetY + r * templateLayout.cellH, templateLayout.cellH, sy)),
+      });
+    }
+  }
+
   // Step A: Key out magenta background & guide lines (unless it's a solid background without keying)
   if (settings.keyMagenta && config.type !== 'background') {
     keyOutMagentaData(curPixels, settings.magentaTolerance);
@@ -185,23 +212,49 @@ export async function runCleanupPipeline(
 
     if (templateLayout && curW === targetW && curH === targetH) {
       // Detect the grid the model actually drew before slicing anything.
-      const detected = detectGrid(curPixels, curW, curH);
       const requestedRects = templateCellRects(templateLayout, config.frameWidth, config.frameHeight);
-      const matches = gridMatchesRequested(detected, {
-        originX: requestedRects[0].x,
-        originY: requestedRects[0].y,
-        cellW: config.frameWidth,
-        cellH: config.frameHeight,
-        cols,
-        rows,
-      });
+      let detectedCols: number;
+      let detectedRows: number;
+      let matches: boolean;
+      let detectedRects: () => CellRect[];
+
+      if (dividerGrid) {
+        // Divider lines set the cell boundaries (raw pixels -> sprite pixels).
+        const fx = curW / rawW;
+        const fy = curH / rawH;
+        const spriteRects = dividerGrid.rects.map((r) => {
+          const x0 = Math.round(r.x * fx);
+          const y0 = Math.round(r.y * fy);
+          return { x: x0, y: y0, w: Math.max(1, Math.round((r.x + r.w) * fx) - x0), h: Math.max(1, Math.round((r.y + r.h) * fy) - y0) };
+        });
+        detectedCols = dividerGrid.cols;
+        detectedRows = dividerGrid.rows;
+        matches = detectedCols === cols && detectedRows === rows;
+        detectedRects = () => spriteRects;
+        if (matches) requestedRects.splice(0, requestedRects.length, ...spriteRects);
+      } else {
+        const detected = detectGrid(curPixels, curW, curH);
+        detectedCols = detected.cols;
+        detectedRows = detected.rows;
+        matches = gridMatchesRequested(detected, {
+          originX: requestedRects[0].x,
+          originY: requestedRects[0].y,
+          cellW: config.frameWidth,
+          cellH: config.frameHeight,
+          cols,
+          rows,
+        });
+        detectedRects = () => detectedCellRects(detected, curW, curH);
+      }
+
       const useDetected = !matches && settings.gridSource === 'detected';
       gridCheck = {
         requested: { cols, rows },
-        detected: { cols: detected.cols, rows: detected.rows },
+        detected: { cols: detectedCols, rows: detectedRows },
         matches,
         usedDetected: useDetected,
         blocked: !matches && !useDetected,
+        source: dividerGrid ? 'dividers' : 'gutters',
       };
 
       if (gridCheck.blocked) {
@@ -221,7 +274,7 @@ export async function runCleanupPipeline(
 
       if (useDetected) {
         // Every detected cell that has a figure becomes a frame, in reading order.
-        cellRects = detectedCellRects(detected, curW, curH).filter(
+        cellRects = detectedRects().filter(
           (r) => getGridCellBounds(curPixels, curW, curH, r.x, r.x + r.w, r.y, r.y + r.h).hasContent
         );
         sliceCount = cellRects.length;

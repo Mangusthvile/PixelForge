@@ -93,10 +93,44 @@ function clear(px: Uint8ClampedArray, i: number) {
   px[i + 3] = 0;
 }
 
+/** Max size of an 8-connected outline group that Auto Clean may remove; longer lines are kept. */
+export const MAX_REMOVABLE_OUTLINE_GROUP = 3;
+
+/** Size of the 8-connected outline group each pixel belongs to (0 for non-outline pixels). */
+function outlineGroupSizes(px: Uint8ClampedArray, w: number, h: number, roleOf: RoleOf): Int32Array {
+  const sizes = new Int32Array(w * h);
+  const seen = new Uint8Array(w * h);
+  for (let start = 0; start < w * h; start++) {
+    if (seen[start] || roleAt(px, start * 4, roleOf) !== 'outline') continue;
+    const members: number[] = [];
+    const stack = [start];
+    seen[start] = 1;
+    while (stack.length) {
+      const i = stack.pop()!;
+      members.push(i);
+      const x = i % w;
+      const y = (i - x) / w;
+      for (const [dx, dy] of N8) {
+        const nx = x + dx;
+        const ny = y + dy;
+        if (nx < 0 || ny < 0 || nx >= w || ny >= h) continue;
+        const j = ny * w + nx;
+        if (!seen[j] && roleAt(px, j * 4, roleOf) === 'outline') {
+          seen[j] = 1;
+          stack.push(j);
+        }
+      }
+    }
+    for (const i of members) sizes[i] = members.length;
+  }
+  return sizes;
+}
+
 /**
  * Remove orphan outline pixels: an outline-colored pixel with no non-outline,
- * non-transparent pixel in its 8-neighborhood. Repeats until nothing changes
- * (each pass decides from the previous pass's result).
+ * non-transparent pixel in its 8-neighborhood. Pixels that belong to a connected
+ * outline longer than 3 pixels are never removed (outlines of tools, limbs, dividers
+ * stay intact). Repeats until nothing changes (each pass decides from the previous pass).
  */
 export function removeOrphanOutline(
   src: Uint8ClampedArray,
@@ -108,11 +142,13 @@ export function removeOrphanOutline(
   let removed = 0;
   for (let pass = 0; pass < w * h; pass++) {
     const next = new Uint8ClampedArray(px);
+    const groupSize = outlineGroupSizes(px, w, h, roleOf);
     let changed = 0;
     for (let y = 0; y < h; y++) {
       for (let x = 0; x < w; x++) {
         const i = (y * w + x) * 4;
         if (roleAt(px, i, roleOf) !== 'outline') continue;
+        if (groupSize[y * w + x] > MAX_REMOVABLE_OUTLINE_GROUP) continue;
         let supported = false;
         for (const [dx, dy] of N8) {
           const nx = x + dx;
@@ -460,4 +496,21 @@ export function shiftFrameVertical(px: Uint8ClampedArray, w: number, h: number, 
     out.set(row, ny * w * 4);
   }
   return out;
+}
+
+/**
+ * Frame-to-frame consistency (report only): compare each frame's body height with the
+ * median of the frames (frames with no body ignored). Frames more than `tolerance`
+ * pixels off get "frame drawn 4px taller than the others".
+ */
+export function consistencyCheck(frameHeights: number[], tolerance = 1): Array<string | null> {
+  const measured = frameHeights.filter((h) => h > 0).sort((a, b) => a - b);
+  if (measured.length < 2) return frameHeights.map(() => null);
+  const median = measured[Math.floor((measured.length - 1) / 2)];
+  return frameHeights.map((h) => {
+    if (h === 0) return null;
+    const diff = h - median;
+    if (Math.abs(diff) <= tolerance) return null;
+    return `frame drawn ${Math.abs(diff)}px ${diff > 0 ? 'taller' : 'shorter'} than the others`;
+  });
 }
