@@ -140,7 +140,7 @@ export function buildGenerationPrompt(
   const anchor = profile.references.find((r) => r.isAnchor || r.id === profile.anchorId);
   if (anchor) {
     parts.push(
-      `ANCHOR REFERENCE INSTRUCTION: The attached reference image is the exact character Anchor (a single character on solid magenta). You MUST keep its proportions, body size, eye style, 1-pixel dark brown outline color (${profile.outlineColor}), and exact color palette identical.`
+      `ANCHOR REFERENCE INSTRUCTION: The attached reference image is the exact character Anchor (a single character on solid magenta). You MUST keep its proportions, body size, eye style, 1-pixel dark outline color (${profile.outlineColor}), and exact color palette identical.`
     );
     if (anchor.base64) {
       referenceImages.push({

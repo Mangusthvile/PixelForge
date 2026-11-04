@@ -9,7 +9,7 @@ export const PALETTE_ROLES: PaletteRole[] = ['body', 'outline', 'tool', 'effect'
 
 /**
  * Default roles for the built-in Characters profile. Colors not listed are 'tool'.
- * Includes both the grayscale character palette and the shipped cream palette, so
+ * Grayscale is the built-in palette; the older cream palette is included too, so
  * either one gets body/outline roles without manual setup.
  */
 export const CHARACTER_ROLE_DEFAULTS: Record<string, PaletteRole> = {

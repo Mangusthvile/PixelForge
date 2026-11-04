@@ -1043,7 +1043,7 @@ export default function App() {
 Action: ${config.description}.
 Target pose: ${poseNote}.
 Facing: ${config.facing}.
-Keeping exact proportions, size, 1-pixel dark brown outline (${activeProfile.outlineColor}), and exact color palette of neighboring frames.
+Keeping exact proportions, size, 1-pixel dark outline (${activeProfile.outlineColor}), and exact color palette of neighboring frames.
 CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Absolutely NO shadows, no text.`;
 
       const response = await fetch('/api/generate', {
