@@ -23,6 +23,13 @@ import {
 } from './utils/storage';
 import { runCleanupPipeline, GridCheck } from './utils/canvasPipeline';
 import { buildStripDataUrl } from './utils/strip';
+import {
+  autoCleanFrameUrls,
+  measureBodyHeights,
+  measureAnchorBodyHeight,
+  formatAutoCleanStats,
+} from './utils/autoCleanCanvas';
+import { sizeCheck } from './utils/autoClean';
 import { buildGenerationPrompt } from './utils/promptBuilder';
 import {
   buildGridTemplateImage,
@@ -51,6 +58,9 @@ import {
   importedAssetName,
   guessImportLayout,
   sliceRects,
+  maxFramesFor,
+  parseTouchUpFileName,
+  sanitizeAssetName,
   ImportLayout,
 } from './utils/naming';
 import { ImportDialog, ImportRequest } from './components/ImportDialog';
@@ -159,19 +169,22 @@ export default function App() {
 
   const [importRequest, setImportRequest] = useState<{
     request: ImportRequest;
-    resolve: (layout: ImportLayout | null) => void;
+    resolve: (result: { layout: ImportLayout; name: string } | null) => void;
   } | null>(null);
 
   const askImportLayout = (request: ImportRequest) =>
-    new Promise<ImportLayout | null>((resolve) => {
+    new Promise<{ layout: ImportLayout; name: string } | null>((resolve) => {
       setImportRequest({
         request,
-        resolve: (layout) => {
+        resolve: (result) => {
           setImportRequest(null);
-          resolve(layout);
+          resolve(result);
         },
       });
     });
+
+  const openItemRef = useRef<LibraryItem | null>(null);
+  openItemRef.current = openItem;
 
   const isOpenItemInLibrary = Boolean(openItem && library.some((i) => i.id === openItem.id));
 
@@ -254,7 +267,9 @@ export default function App() {
   // frames change and the sheet strip (cleanedImage) is rebuilt from them, so thumbnails,
   // downloads and exports always match the frames. Stale rebuilds from older edits are dropped.
   const stripBuildRef = useRef(0);
-  const applyFrameEdit = (newFrames: string[]) => {
+  const [frameUndoStack, setFrameUndoStack] = useState<string[][]>([]);
+  const applyFrameEdit = (newFrames: string[], recordUndo = true) => {
+    if (recordUndo) setFrameUndoStack((prev) => [...prev.slice(-19), frames]);
     setFrames(newFrames);
     const build = ++stripBuildRef.current;
     buildStripDataUrl(newFrames, config.frameWidth, config.frameHeight)
@@ -263,6 +278,75 @@ export default function App() {
       })
       .catch((err) => console.error('Failed to rebuild sheet strip:', err));
   };
+
+  const handleUndoFrameEdit = () => {
+    const prev = frameUndoStack[frameUndoStack.length - 1];
+    if (!prev) return;
+    setFrameUndoStack((stack) => stack.slice(0, -1));
+    setAutoCleanMessage(null);
+    applyFrameEdit(prev, false);
+  };
+
+  // Auto Clean (deterministic): orphan outline pixels, specks and pinholes on every frame.
+  const [isAutoCleaning, setIsAutoCleaning] = useState(false);
+  const [autoCleanMessage, setAutoCleanMessage] = useState<string | null>(null);
+  const handleAutoClean = async () => {
+    if (frames.length === 0) return;
+    setIsAutoCleaning(true);
+    try {
+      const res = await autoCleanFrameUrls(frames, activeProfile);
+      setAutoCleanMessage(formatAutoCleanStats(res.stats));
+      if (res.frames.some((f, i) => f !== frames[i])) applyFrameEdit(res.frames);
+    } catch (err) {
+      console.error('Auto Clean failed:', err);
+      setError('Auto Clean failed: ' + (err instanceof Error ? err.message : String(err)));
+    } finally {
+      setIsAutoCleaning(false);
+    }
+  };
+
+  /** Auto Clean a freshly generated animation if the profile asks for it (default on). */
+  const autoCleanGenerated = async (item: LibraryItem, profile: StyleProfile): Promise<LibraryItem> => {
+    if (item.type !== 'animation' || profile.autoCleanAfterGeneration === false || item.frames.length === 0) {
+      return item;
+    }
+    try {
+      const res = await autoCleanFrameUrls(item.frames, profile);
+      setAutoCleanMessage(`After generation — ${formatAutoCleanStats(res.stats)}`);
+      if (!res.frames.some((f, i) => f !== item.frames[i])) return item;
+      const strip = await buildStripDataUrl(res.frames, item.metadata.frameWidth, item.metadata.frameHeight);
+      setFrames(res.frames);
+      setCleanedImage(strip);
+      return { ...item, frames: res.frames, cleanedImage: strip };
+    } catch (err) {
+      console.error('Auto Clean after generation failed:', err);
+      return item;
+    }
+  };
+
+  // Size check (report only): each frame's body height vs the profile Anchor's.
+  const [frameSizeWarnings, setFrameSizeWarnings] = useState<Array<string | null>>([]);
+  useEffect(() => {
+    if (config.type !== 'animation' || frames.length === 0) {
+      setFrameSizeWarnings([]);
+      return;
+    }
+    let cancelled = false;
+    (async () => {
+      try {
+        const [heights, anchorHeight] = await Promise.all([
+          measureBodyHeights(frames, activeProfile),
+          measureAnchorBodyHeight(activeProfile, config.frameWidth, config.frameHeight),
+        ]);
+        if (!cancelled) setFrameSizeWarnings(sizeCheck(heights, anchorHeight));
+      } catch (err) {
+        if (!cancelled) setFrameSizeWarnings([]);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+  }, [frames, activeProfile, config.type, config.frameWidth, config.frameHeight]);
 
   // Auto-save: any change to the open asset (frames, cleaned sheet, name, fps) updates its library entry.
   useEffect(() => {
@@ -544,6 +628,8 @@ export default function App() {
     setOpenItem(null);
     setSaveStatus('idle');
     setComputedScale(undefined);
+    setFrameUndoStack([]);
+    setAutoCleanMessage(null);
     setGenerationProgressText('Preparing style references & prompt...');
 
     try {
@@ -700,7 +786,7 @@ export default function App() {
           },
         };
         setActiveTab('preview');
-        await openAndSaveNewItem(newItem);
+        await openAndSaveNewItem(await autoCleanGenerated(newItem, targetProfile));
         return;
       }
 
@@ -807,7 +893,7 @@ export default function App() {
           setActiveTab('compare');
           return;
         }
-        await openAndSaveNewItem(newItem);
+        await openAndSaveNewItem(await autoCleanGenerated(newItem, targetProfile));
       }
     } catch (err: any) {
       console.error('Generation failure:', err);
@@ -830,12 +916,14 @@ export default function App() {
       return;
     }
     setGridIssue(null);
-    await openAndSaveNewItem({
+    const itemProfile = profiles.find((p) => p.id === pendingItem.profileId) || activeProfile;
+    const sliced: LibraryItem = {
       ...pendingItem,
       cleanedImage: res.cleanedDataUrl,
       frames: res.frames,
       metadata: { ...pendingItem.metadata, frameCount: res.frames.length, baselineY: res.baselineY },
-    });
+    };
+    await openAndSaveNewItem(await autoCleanGenerated(sliced, itemProfile));
   };
 
   // Switch to Frame by Frame handler (from copy warning banner)
@@ -1005,6 +1093,8 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
     setOpenItem(item);
     setSaveStatus('idle');
     setComputedScale(undefined);
+    setFrameUndoStack([]);
+    setAutoCleanMessage(null);
     setGridIssue(null);
     if (settings.gridSource) setSettings({ ...settings, gridSource: undefined });
     setConfig((prev) => normalizeConfig({
@@ -1060,17 +1150,34 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
         const gif = file.type === 'image/gif' || /\.gif$/i.test(file.name) ? await decodeGifFrames(dataUrl) : null;
         const gifFrameCount = gif?.frames.length || 1;
 
-        const layout = await askImportLayout({
+        // A touch-up handoff file (name_WxH_Nf.png) carries its own name and frame layout.
+        const touchUp = parseTouchUpFileName(file.name);
+        const touchUpFits =
+          touchUp && maxFramesFor(width, height, touchUp.frameWidth, touchUp.frameHeight) >= touchUp.frameCount;
+        const initial: ImportLayout = touchUpFits
+          ? {
+              type: touchUp!.frameCount > 1 ? 'animation' : config.type,
+              frameWidth: touchUp!.frameWidth,
+              frameHeight: touchUp!.frameHeight,
+              frameCount: touchUp!.frameCount,
+            }
+          : guessImportLayout(width, height, config, gifFrameCount);
+
+        const answer = await askImportLayout({
           fileName: file.name,
           preview: dataUrl,
           width,
           height,
           gifFrameCount,
-          initial: guessImportLayout(width, height, config, gifFrameCount),
+          initial,
+          initialName: touchUpFits ? touchUp!.name : importedAssetName(file.name),
+          fromTouchUpName: !!touchUpFits,
           index: n + 1,
           total: files.length,
         });
-        if (!layout) continue;
+        if (!answer) continue;
+        const { layout } = answer;
+        const itemName = sanitizeAssetName(answer.name) || importedAssetName(file.name);
 
         const { frameWidth: fw, frameHeight: fh } = layout;
         let frames: string[];
@@ -1086,7 +1193,7 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
         const isAnimated = frames.length > 1;
         const item: LibraryItem = {
           id: `item_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
-          name: importedAssetName(file.name),
+          name: itemName,
           type: layout.type,
           profileId: activeProfile.id,
           profileName: activeProfile.name,
@@ -1106,7 +1213,10 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
           },
         };
         const saved = await saveNewItem(item);
-        if (libraryRef.current.some((i) => i.id === saved.id)) lastImported = saved;
+        if (libraryRef.current.some((i) => i.id === saved.id)) {
+          lastImported = saved;
+          if (openItemRef.current?.id === saved.id) handleSelectAndOpenItem(saved);
+        }
       } catch (err) {
         reportStorageError(`Couldn't import "${file.name}"`, err);
       }
@@ -1313,6 +1423,12 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
                 fps={fps}
                 onChangeFps={setFps}
                 onUpdateFrames={applyFrameEdit}
+                onAutoClean={handleAutoClean}
+                isAutoCleaning={isAutoCleaning}
+                autoCleanMessage={autoCleanMessage}
+                onUndo={handleUndoFrameEdit}
+                canUndo={frameUndoStack.length > 0}
+                frameWarnings={frameSizeWarnings}
                 onEditFrame={(idx) => {
                   setEditingFrameIndex(idx);
                   setPixelEditorOpen(true);
@@ -1396,7 +1512,7 @@ CRITICAL BACKGROUND REQUIREMENT: Solid flat #FF00FF magenta background ONLY. Abs
         <ImportDialog
           key={importRequest.request.fileName + importRequest.request.index}
           request={importRequest.request}
-          onConfirm={(layout) => importRequest.resolve(layout)}
+          onConfirm={(layout, name) => importRequest.resolve({ layout, name })}
           onSkip={() => importRequest.resolve(null)}
         />
       )}

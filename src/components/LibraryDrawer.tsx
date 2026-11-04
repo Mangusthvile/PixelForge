@@ -22,6 +22,7 @@ import {
   ChevronDown,
   Archive,
   Upload,
+  Brush,
 } from 'lucide-react';
 import {
   downloadDataUrl,
@@ -29,6 +30,7 @@ import {
   exportFramesZip,
   exportMultipleAssetsZip,
   downloadBlob,
+  exportForTouchUp,
 } from '../utils/export';
 
 interface LibraryDrawerProps {
@@ -104,6 +106,14 @@ export const LibraryDrawer: React.FC<LibraryDrawerProps> = ({
       console.error('Failed to export selected ZIP:', err);
     } finally {
       setIsExportingZip(false);
+    }
+  };
+
+  const handleTouchUpExport = async (chosen: LibraryItem[]) => {
+    try {
+      await exportForTouchUp(chosen);
+    } catch (err) {
+      console.error('Failed to export for touch-up:', err);
     }
   };
 
@@ -202,6 +212,18 @@ export const LibraryDrawer: React.FC<LibraryDrawerProps> = ({
                 <Square className="w-3.5 h-3.5" />
               )}
               <span className="hidden md:inline">Select All</span>
+            </button>
+          )}
+
+          {selectedIds.size > 0 && (
+            <button
+              onClick={() => handleTouchUpExport(items.filter((i) => selectedIds.has(i.id)))}
+              data-testid="touchup-export-selected"
+              className="flex items-center gap-1.5 px-2.5 py-1 bg-zinc-800 hover:bg-zinc-700 text-zinc-200 rounded text-xs border border-zinc-700 transition"
+              title="Download the selected assets as PNG strips named name_WxH_Nf.png, in one ZIP"
+            >
+              <Brush className="w-3.5 h-3.5 text-amber-400" />
+              <span>Export for touch-up ({selectedIds.size})</span>
             </button>
           )}
 
@@ -327,6 +349,15 @@ export const LibraryDrawer: React.FC<LibraryDrawerProps> = ({
                           title="Download PNG Sheet"
                         >
                           <Download className="w-3 h-3" />
+                        </button>
+
+                        {/* Touch-up handoff strip */}
+                        <button
+                          onClick={() => handleTouchUpExport([item])}
+                          className="p-1 hover:bg-zinc-800 rounded hover:text-amber-400"
+                          title="Export for touch-up (PNG strip named name_WxH_Nf.png)"
+                        >
+                          <Brush className="w-3 h-3" />
                         </button>
 
                         {/* If Animation: Export GIF */}

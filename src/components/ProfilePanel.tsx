@@ -21,6 +21,9 @@ import {
 } from 'lucide-react';
 import { extractPaletteFromImageUrl } from '../utils/canvasPipeline';
 import { getDefaultProfile } from '../utils/storage';
+import { PALETTE_ROLES, PaletteRole, resolvePaletteRoles } from '../utils/autoClean';
+
+const ROLE_LETTER: Record<PaletteRole, string> = { body: 'B', outline: 'O', tool: 'T', effect: 'E' };
 
 interface ProfilePanelProps {
   profiles: StyleProfile[];
@@ -128,6 +131,15 @@ export const ProfilePanel: React.FC<ProfilePanelProps> = ({
       ...activeProfile,
       palette: activeProfile.palette.filter((c) => c !== hex),
     });
+  };
+
+  // Clicking a swatch cycles its Auto Clean role: body -> outline -> tool -> effect.
+  const roles = resolvePaletteRoles(activeProfile);
+  const handleCycleRole = (hex: string) => {
+    const key = hex.toLowerCase();
+    const current = roles[key] || 'body';
+    const next = PALETTE_ROLES[(PALETTE_ROLES.indexOf(current) + 1) % PALETTE_ROLES.length];
+    onUpdateProfile({ ...activeProfile, paletteRoles: { ...roles, [key]: next } });
   };
 
   const handleExtractPalette = async () => {
@@ -416,10 +428,15 @@ export const ProfilePanel: React.FC<ProfilePanelProps> = ({
           {activeProfile.palette.map((color) => (
             <div
               key={color}
-              className="group relative w-5 h-5 rounded-sm border border-zinc-700/60 shadow-xs cursor-pointer hover:scale-110 transition"
+              onClick={() => handleCycleRole(color)}
+              data-testid={`swatch-${color.toLowerCase()}`}
+              className="group relative w-6 h-6 rounded-sm border border-zinc-700/60 shadow-xs cursor-pointer hover:scale-110 transition"
               style={{ backgroundColor: color }}
-              title={color}
+              title={`${color} — role: ${roles[color.toLowerCase()] || 'body'} (click to change)`}
             >
+              <span className="absolute bottom-0 right-0 px-[2px] text-[8px] leading-none font-bold font-mono bg-zinc-950/85 text-amber-300 rounded-tl-sm">
+                {ROLE_LETTER[roles[color.toLowerCase()] || 'body']}
+              </span>
               <button
                 onClick={(e) => {
                   e.stopPropagation();
@@ -435,6 +452,20 @@ export const ProfilePanel: React.FC<ProfilePanelProps> = ({
             <span className="text-[10px] text-zinc-600 py-1 px-1">No colors in palette.</span>
           )}
         </div>
+
+        <p className="text-[10px] text-zinc-500 leading-snug">
+          Click a swatch to set its Auto Clean role: B body, O outline, T tool, E effect.
+        </p>
+        <label className="flex items-center gap-1.5 text-[11px] text-zinc-300">
+          <input
+            type="checkbox"
+            data-testid="auto-clean-after-generation"
+            checked={activeProfile.autoCleanAfterGeneration !== false}
+            onChange={(e) => onUpdateProfile({ ...activeProfile, autoCleanAfterGeneration: e.target.checked })}
+            className="rounded border-zinc-700 bg-zinc-950 text-amber-500 focus:ring-0"
+          />
+          <span>Auto Clean after generation</span>
+        </label>
 
         {/* Add Color Input */}
         <div className="flex items-center gap-1.5">

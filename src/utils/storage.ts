@@ -19,6 +19,13 @@ export const INITIAL_CHARACTERS_PROFILE: StyleProfile = {
   isBuiltIn: true,
   anchorId: 'ref_char_anchor_noblush',
   palette: ['#faf3e8', '#2f2522', '#b9b3a1', '#e7d5c6'],
+  paletteRoles: {
+    '#faf3e8': 'body',
+    '#e7d5c6': 'body',
+    '#b9b3a1': 'body',
+    '#2f2522': 'outline',
+  },
+  autoCleanAfterGeneration: true,
   references: [
     {
       id: 'ref_char_anchor_noblush',

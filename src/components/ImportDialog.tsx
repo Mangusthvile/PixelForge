@@ -9,13 +9,17 @@ export interface ImportRequest {
   height: number;
   gifFrameCount: number; // 1 for still images
   initial: ImportLayout;
+  /** Library name to save under (from a touch-up file name, or the file name). */
+  initialName: string;
+  /** True when frame size / count came from a name_WxH_Nf file name. */
+  fromTouchUpName?: boolean;
   index: number; // 1-based position in the batch
   total: number;
 }
 
 interface ImportDialogProps {
   request: ImportRequest;
-  onConfirm: (layout: ImportLayout) => void;
+  onConfirm: (layout: ImportLayout, name: string) => void;
   onSkip: () => void;
 }
 
@@ -34,17 +38,19 @@ export const ImportDialog: React.FC<ImportDialogProps> = ({ request, onConfirm, 
   const [frameWidth, setFrameWidth] = useState(request.initial.frameWidth);
   const [frameHeight, setFrameHeight] = useState(request.initial.frameHeight);
   const [frameCount, setFrameCount] = useState(request.initial.frameCount);
+  const [name, setName] = useState(request.initialName);
 
   // GIF frames are used when the frame size is the whole GIF; otherwise the first frame is sliced.
   const usesGifFrames = gifFrameCount > 1 && frameWidth === width && frameHeight === height;
   const maxFrames = usesGifFrames ? gifFrameCount : maxFramesFor(width, height, frameWidth, frameHeight);
 
   const error = useMemo(() => {
+    if (!name.trim()) return 'Enter a name.';
     if (!(frameWidth >= 1 && frameWidth <= width)) return `Frame width must be 1–${width}.`;
     if (!(frameHeight >= 1 && frameHeight <= height)) return `Frame height must be 1–${height}.`;
     if (!(frameCount >= 1 && frameCount <= maxFrames)) return `Frame count must be 1–${maxFrames} for this frame size.`;
     return null;
-  }, [frameWidth, frameHeight, frameCount, maxFrames, width, height]);
+  }, [name, frameWidth, frameHeight, frameCount, maxFrames, width, height]);
 
   const changeFrameSize = (w: number, h: number) => {
     setFrameWidth(w);
@@ -112,7 +118,21 @@ export const ImportDialog: React.FC<ImportDialogProps> = ({ request, onConfirm, 
           {maxFrames > 0 ? ` • fits up to ${maxFrames} frame${maxFrames === 1 ? '' : 's'}` : ''}
         </p>
 
+        {request.fromTouchUpName && (
+          <p className="text-[11px] text-emerald-300/90">Frame size and count read from the file name.</p>
+        )}
+
         <div className="grid grid-cols-2 gap-2">
+          <label className="col-span-2 space-y-1">
+            <span className="text-[11px] text-zinc-400">Name</span>
+            <input
+              type="text"
+              value={name}
+              data-testid="import-name"
+              onChange={(e) => setName(e.target.value)}
+              className="w-full bg-zinc-950 border border-zinc-700 rounded px-2 py-1 text-xs font-mono text-zinc-100 focus:border-amber-500 focus:outline-none"
+            />
+          </label>
           <label className="col-span-2 space-y-1">
             <span className="text-[11px] text-zinc-400">Type</span>
             <select
@@ -153,7 +173,7 @@ export const ImportDialog: React.FC<ImportDialogProps> = ({ request, onConfirm, 
           </button>
           <button
             disabled={!!error}
-            onClick={() => onConfirm({ type, frameWidth, frameHeight, frameCount })}
+            onClick={() => onConfirm({ type, frameWidth, frameHeight, frameCount }, name)}
             className="px-3 py-1.5 rounded bg-amber-500 text-zinc-950 hover:bg-amber-400 disabled:opacity-40 disabled:cursor-not-allowed text-xs font-semibold"
           >
             Import

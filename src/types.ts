@@ -23,6 +23,10 @@ export interface StyleProfile {
   frameHeight: number;
   outlineColor: string; // e.g. #3d251e
   isBuiltIn?: boolean;
+  // Per-swatch role used by Auto Clean (lowercase hex -> role). Missing colors use defaults.
+  paletteRoles?: Record<string, 'body' | 'outline' | 'tool' | 'effect'>;
+  // Run Auto Clean on animation frames right after generation (default on when undefined).
+  autoCleanAfterGeneration?: boolean;
 }
 
 /** An image-capable model as reported by the server's /api/models (real Gemini model ids). */

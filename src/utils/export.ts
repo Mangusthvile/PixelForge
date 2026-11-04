@@ -1,7 +1,8 @@
 import JSZip from 'jszip';
 import { LibraryItem } from '../types';
 import { createAnimatedGif } from './gifEncoder';
-import { manifestEntry } from './strip';
+import { manifestEntry, buildStripDataUrl } from './strip';
+import { touchUpFileName } from './naming';
 
 // Helper to trigger file download
 export function downloadBlob(blob: Blob, filename: string): void {
@@ -144,4 +145,42 @@ export async function exportMultipleAssetsZip(items: LibraryItem[]): Promise<Blo
   zip.file('manifest.json', JSON.stringify(manifest, null, 2));
 
   return zip.generateAsync({ type: 'blob' });
+}
+
+/**
+ * Touch-up handoff file for one item: the frames as one PNG strip named
+ * <name>_<frameW>x<frameH>_<frames>f.png, rebuilt from the current frames.
+ * Non-animations are exported as a single frame at their image size.
+ */
+export async function touchUpFile(item: LibraryItem): Promise<{ filename: string; dataUrl: string }> {
+  if (item.type === 'animation' && item.frames && item.frames.length > 0) {
+    const { frameWidth, frameHeight } = item.metadata;
+    const dataUrl = await buildStripDataUrl(item.frames, frameWidth, frameHeight);
+    return { filename: touchUpFileName(item.name, frameWidth, frameHeight, item.frames.length), dataUrl };
+  }
+  const img = await loadImage(item.cleanedImage);
+  return {
+    filename: touchUpFileName(item.name, img.naturalWidth, img.naturalHeight, 1),
+    dataUrl: item.cleanedImage,
+  };
+}
+
+/** One item downloads a PNG; several download one ZIP of PNGs. */
+export async function exportForTouchUp(items: LibraryItem[]): Promise<void> {
+  if (items.length === 0) return;
+  if (items.length === 1) {
+    const { filename, dataUrl } = await touchUpFile(items[0]);
+    downloadDataUrl(dataUrl, filename);
+    return;
+  }
+  const zip = new JSZip();
+  const used = new Set<string>();
+  for (const item of items) {
+    const { filename, dataUrl } = await touchUpFile(item);
+    let unique = filename;
+    for (let n = 2; used.has(unique); n++) unique = filename.replace(/\.png$/, ` (${n}).png`);
+    used.add(unique);
+    zip.file(unique, dataUrlToBlob(dataUrl));
+  }
+  downloadBlob(await zip.generateAsync({ type: 'blob' }), 'pixelforge_touchup.zip');
 }

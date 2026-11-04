@@ -15,6 +15,8 @@ import {
   Sparkles,
   Cpu,
   ListOrdered,
+  Wand2,
+  Undo2,
 } from 'lucide-react';
 import { exportAssetAsGif, downloadBlob } from '../utils/export';
 import { LibraryItem } from '../types';
@@ -35,6 +37,13 @@ interface AnimationPreviewProps {
   onRetry?: () => void;
   onSwitchToFrameByFrame?: () => void;
   onSelectStrongerModel?: () => void;
+  onAutoClean?: () => void;
+  isAutoCleaning?: boolean;
+  autoCleanMessage?: string | null;
+  onUndo?: () => void;
+  canUndo?: boolean;
+  /** Per-frame size check result, e.g. "2px taller than anchor" (null = fine). */
+  frameWarnings?: Array<string | null>;
 }
 
 export const AnimationPreview: React.FC<AnimationPreviewProps> = ({
@@ -53,6 +62,12 @@ export const AnimationPreview: React.FC<AnimationPreviewProps> = ({
   onRetry,
   onSwitchToFrameByFrame,
   onSelectStrongerModel,
+  onAutoClean,
+  isAutoCleaning,
+  autoCleanMessage,
+  onUndo,
+  canUndo,
+  frameWarnings,
 }) => {
   const [currentFrameIndex, setCurrentFrameIndex] = useState(0);
   const [isPlaying, setIsPlaying] = useState(true);
@@ -370,10 +385,38 @@ export const AnimationPreview: React.FC<AnimationPreviewProps> = ({
           <span className="font-semibold uppercase tracking-wider text-[11px] text-zinc-300">
             Frames Filmstrip ({frames.length})
           </span>
-          <span className="text-[10px] text-zinc-500">
-            Click 'Redo' on any cell to regenerate it using its neighbors
-          </span>
+          <div className="flex items-center gap-2">
+            {onUndo && (
+              <button
+                onClick={onUndo}
+                disabled={!canUndo}
+                data-testid="frames-undo"
+                className="flex items-center gap-1 px-2 py-0.5 rounded bg-zinc-800 border border-zinc-700 text-[11px] text-zinc-200 hover:bg-zinc-700 disabled:opacity-40 disabled:cursor-not-allowed"
+                title="Undo the last frame edit"
+              >
+                <Undo2 className="w-3 h-3" />
+                <span>Undo</span>
+              </button>
+            )}
+            {onAutoClean && (
+              <button
+                onClick={onAutoClean}
+                disabled={isAutoCleaning}
+                data-testid="auto-clean"
+                className="flex items-center gap-1 px-2 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/40 text-[11px] text-emerald-300 hover:bg-emerald-500/25 disabled:opacity-50"
+                title="Remove orphan outline pixels and specks, fill pinholes, on every frame (undoable)"
+              >
+                <Wand2 className="w-3 h-3" />
+                <span>{isAutoCleaning ? 'Cleaning…' : 'Auto Clean'}</span>
+              </button>
+            )}
+          </div>
         </div>
+        {autoCleanMessage && (
+          <div data-testid="auto-clean-message" className="text-[11px] text-emerald-300/90">
+            {autoCleanMessage}
+          </div>
+        )}
 
         <div className="flex items-center gap-2.5 overflow-x-auto pb-2.5 pt-1">
           {frames.map((frame, idx) => {
@@ -424,6 +467,17 @@ export const AnimationPreview: React.FC<AnimationPreviewProps> = ({
                     className="max-w-full max-h-full object-contain [image-rendering:pixelated]"
                   />
                 </div>
+
+                {/* Size check badge */}
+                {frameWarnings?.[idx] && (
+                  <span
+                    data-testid={`size-warning-${idx}`}
+                    className="max-w-[80px] text-center text-[9px] leading-tight px-1 py-0.5 rounded bg-amber-500/15 border border-amber-500/40 text-amber-300"
+                    title="Body height compared to the profile Anchor (tools ignored)"
+                  >
+                    {frameWarnings[idx]}
+                  </span>
+                )}
 
                 {/* Frame Action Toolbar */}
                 <div className="flex items-center gap-1 pt-0.5 opacity-90 group-hover:opacity-100 transition">

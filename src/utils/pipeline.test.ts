@@ -563,3 +563,206 @@ test('deleting a frame rebuilds a 4-frame strip and the manifest says 4', async 
   const small = composeStripPixels([new Uint8ClampedArray(4 * 4 * 4).fill(255)], 4, 8);
   assert.equal(small.pixels[(7 * 4 + 0) * 4 + 3], 0);
 });
+
+// ---------------------------------------------------------------------------
+// Auto Clean
+// ---------------------------------------------------------------------------
+
+/** Build a frame from rows of characters: '.' transparent, B body, O outline, T tool. */
+function frameFromRows(rows: string[]) {
+  const colors: Record<string, [number, number, number]> = {
+    B: [0xff, 0xff, 0xff], // #ffffff body
+    G: [0xbd, 0xbd, 0xbd], // #bdbdbd body
+    O: [0x2b, 0x2b, 0x2b], // #2b2b2b outline
+    T: [0x8b, 0x5a, 0x2b], // tool
+  };
+  const h = rows.length;
+  const w = rows[0].length;
+  const px = new Uint8ClampedArray(w * h * 4);
+  rows.forEach((row, y) =>
+    [...row].forEach((ch, x) => {
+      if (ch === '.') return;
+      const [r, g, b] = colors[ch];
+      px.set([r, g, b, 255], (y * w + x) * 4);
+    })
+  );
+  return { px, w, h };
+}
+
+function rowsFromFrame(px: Uint8ClampedArray, w: number, h: number): string[] {
+  const names: Record<string, string> = { '255,255,255': 'B', '189,189,189': 'G', '43,43,43': 'O', '139,90,43': 'T' };
+  const rows: string[] = [];
+  for (let y = 0; y < h; y++) {
+    let row = '';
+    for (let x = 0; x < w; x++) {
+      const i = (y * w + x) * 4;
+      row += px[i + 3] === 0 ? '.' : names[`${px[i]},${px[i + 1]},${px[i + 2]}`] || '?';
+    }
+    rows.push(row);
+  }
+  return rows;
+}
+
+async function characterRoleOf() {
+  const { makeRoleLookup, resolvePaletteRoles } = await import('./autoClean.ts');
+  const roles = resolvePaletteRoles({
+    id: 'profile_characters',
+    palette: ['#ffffff', '#bdbdbd', '#e3e3e3', '#2b2b2b', '#8b5a2b'],
+    outlineColor: '#2b2b2b',
+  });
+  return { roles, roleOf: makeRoleLookup(roles) };
+}
+
+test('palette roles: Characters defaults and explicit per-swatch roles', async () => {
+  const { resolvePaletteRoles } = await import('./autoClean.ts');
+  const { roles } = await characterRoleOf();
+  assert.deepEqual(roles, {
+    '#ffffff': 'body',
+    '#bdbdbd': 'body',
+    '#e3e3e3': 'body',
+    '#2b2b2b': 'outline',
+    '#8b5a2b': 'tool',
+  });
+  // The shipped cream palette also gets body/outline roles
+  const cream = resolvePaletteRoles({ id: 'profile_characters', palette: ['#faf3e8', '#2f2522'], outlineColor: '#2f2522' });
+  assert.deepEqual(cream, { '#faf3e8': 'body', '#2f2522': 'outline' });
+  // Explicit role wins; other profiles default to body
+  const custom = resolvePaletteRoles({
+    id: 'profile_x',
+    palette: ['#ff0000', '#00ff00'],
+    outlineColor: '#000000',
+    paletteRoles: { '#00ff00': 'effect' },
+  });
+  assert.deepEqual(custom, { '#ff0000': 'body', '#00ff00': 'effect' });
+});
+
+test('removeOrphanOutline removes unsupported outline pixels until nothing changes', async () => {
+  const { removeOrphanOutline } = await import('./autoClean.ts');
+  const { roleOf } = await characterRoleOf();
+  // Outline pixels with no body/tool neighbor: the pair at the top right and the corner pixel.
+  const f = frameFromRows([
+    '.....OO',
+    '.OOO...',
+    '.OBO...',
+    '.OOO...',
+    'O......',
+  ]);
+  const { pixels, removed } = removeOrphanOutline(f.px, f.w, f.h, roleOf);
+  assert.deepEqual(rowsFromFrame(pixels, f.w, f.h), [
+    '.......',
+    '.OOO...',
+    '.OBO...',
+    '.OOO...',
+    '.......',
+  ]);
+  assert.equal(removed, 3);
+
+  // Only the outline pixel touching the body survives a stray outline line
+  const chain = frameFromRows(['BOOOO']);
+  const res = removeOrphanOutline(chain.px, chain.w, chain.h, roleOf);
+  assert.deepEqual(rowsFromFrame(res.pixels, chain.w, chain.h), ['BO...']);
+
+  // Input is not mutated
+  assert.equal(rowsFromFrame(f.px, f.w, f.h)[0], '.....OO');
+});
+
+test('fillPinholes fills enclosed transparent pixels with the most common non-outline neighbor', async () => {
+  const { fillPinholes } = await import('./autoClean.ts');
+  const { roleOf } = await characterRoleOf();
+  const f = frameFromRows([
+    'OOOOO',
+    'OBGBO',
+    'OG.GO',
+    'OBGBO',
+    'OOOOO',
+  ]);
+  const { pixels, filled } = fillPinholes(f.px, f.w, f.h, roleOf);
+  assert.equal(filled, 1);
+  // B and G both appear 4 times; the color that reaches the top count first (G) wins, deterministically
+  assert.equal(rowsFromFrame(pixels, f.w, f.h)[2], 'OGGGO');
+
+  // Needs at least 6 filled neighbors
+  const open = frameFromRows(['BBB', 'B..', 'B..']);
+  assert.equal(fillPinholes(open.px, open.w, open.h, roleOf).filled, 0);
+
+  // Needs a body neighbor: a hole surrounded only by outline + tool stays open
+  const toolHole = frameFromRows(['OTO', 'T.T', 'OTO']);
+  assert.equal(fillPinholes(toolHole.px, toolHole.w, toolHole.h, roleOf).filled, 0);
+});
+
+test('removeSpecks removes single pixels with no 4-neighbors', async () => {
+  const { removeSpecks } = await import('./autoClean.ts');
+  const f = frameFromRows([
+    'B...T',
+    '.....',
+    '..B..',
+    '.B.BB',
+  ]);
+  const { pixels, removed } = removeSpecks(f.px, f.w, f.h);
+  // (0,0), (4,0), (2,2) and (1,3) are isolated; diagonal contact does not count; the BB pair stays
+  assert.deepEqual(rowsFromFrame(pixels, f.w, f.h), ['.....', '.....', '.....', '...BB']);
+  assert.equal(removed, 4);
+});
+
+test('autoCleanPixels is deterministic and reports what it changed', async () => {
+  const { autoCleanPixels } = await import('./autoClean.ts');
+  const { roleOf } = await characterRoleOf();
+  const f = frameFromRows([
+    'O......',
+    '.OOOOO.',
+    '.OBBBO.',
+    '.OB.BO.',
+    '.OBBBO.',
+    '.OOOOO.',
+    '......T',
+  ]);
+  const a = autoCleanPixels(f.px, f.w, f.h, roleOf);
+  const b = autoCleanPixels(f.px, f.w, f.h, roleOf);
+  assert.deepEqual(Array.from(a.pixels), Array.from(b.pixels));
+  assert.deepEqual(a.stats, { orphanOutline: 1, specks: 1, pinholes: 1 });
+  assert.deepEqual(rowsFromFrame(a.pixels, f.w, f.h), [
+    '.......',
+    '.OOOOO.',
+    '.OBBBO.',
+    '.OBBBO.',
+    '.OBBBO.',
+    '.OOOOO.',
+    '.......',
+  ]);
+});
+
+test('size check compares body height (tools ignored) to the anchor', async () => {
+  const { bodyHeight, sizeCheck } = await import('./autoClean.ts');
+  const { roleOf } = await characterRoleOf();
+  const f = frameFromRows([
+    'T..',
+    'TB.',
+    'TB.',
+    'TG.',
+    'T..',
+  ]);
+  assert.equal(bodyHeight(f.px, f.w, f.h, roleOf), 3); // tool rows don't count
+  assert.deepEqual(sizeCheck([14, 15, 16, 12, 0], 14), [
+    null,
+    null,
+    '2px taller than anchor',
+    '2px shorter than anchor',
+    'no body pixels found',
+  ]);
+  assert.deepEqual(sizeCheck([10, 20], 0), [null, null]);
+});
+
+test('touch-up file names round-trip', async () => {
+  const { touchUpFileName, parseTouchUpFileName } = await import('./naming.ts');
+  assert.equal(touchUpFileName('fig_spear', 40, 24, 5), 'fig_spear_40x24_5f.png');
+  assert.deepEqual(parseTouchUpFileName('fig_spear_40x24_5f.png'), {
+    name: 'fig_spear',
+    frameWidth: 40,
+    frameHeight: 24,
+    frameCount: 5,
+  });
+  assert.equal(parseTouchUpFileName('fig_spear_40x24_5f (1).png')?.name, 'fig_spear');
+  assert.equal(parseTouchUpFileName('bg_forest_320x64_1f.png')?.frameCount, 1);
+  assert.equal(parseTouchUpFileName('walk_row.png'), null);
+  assert.equal(parseTouchUpFileName('fig_x_0x24_5f.png'), null);
+});

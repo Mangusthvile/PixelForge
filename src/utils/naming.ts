@@ -178,3 +178,36 @@ export function sliceRects(
   }
   return rects;
 }
+
+// ---------------------------------------------------------------------------
+// Touch-up handoff file names: <name>_<frameW>x<frameH>_<frames>f.png
+// ---------------------------------------------------------------------------
+
+export interface TouchUpFileInfo {
+  name: string;
+  frameWidth: number;
+  frameHeight: number;
+  frameCount: number;
+}
+
+/** fig_spear, 40, 24, 5 -> fig_spear_40x24_5f.png */
+export function touchUpFileName(name: string, frameWidth: number, frameHeight: number, frameCount: number): string {
+  return `${name}_${frameWidth}x${frameHeight}_${frameCount}f.png`;
+}
+
+/**
+ * Parse a touch-up file name back into name, frame size and frame count.
+ * Tolerates a browser duplicate suffix ("fig_spear_40x24_5f (1).png"). Null if it doesn't match.
+ */
+export function parseTouchUpFileName(fileName: string): TouchUpFileInfo | null {
+  const base = fileName
+    .replace(/\.[^.]+$/, '')
+    .replace(/\s*\(\d+\)$/, '')
+    .trim();
+  const m = /^(.+?)_(\d+)x(\d+)_(\d+)f$/i.exec(base);
+  if (!m) return null;
+  const [, name, w, h, n] = m;
+  const info = { name, frameWidth: +w, frameHeight: +h, frameCount: +n };
+  if (!info.name || info.frameWidth < 1 || info.frameHeight < 1 || info.frameCount < 1) return null;
+  return info;
+}

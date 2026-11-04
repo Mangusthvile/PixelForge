@@ -22,11 +22,14 @@ npx tsx --test src/utils/pipeline.test.ts
 - `src/utils/gridLayout.ts`: grid template, pose notes, and copy detection. `promptBuilder.ts` builds prompts.
 - `src/utils/storage.ts`: IndexedDB storage for library items and profiles, plus the built-in profile defaults.
 - `src/utils/presets.ts`: animation, background, and prop presets. `naming.ts`: asset naming and versioning helpers.
+- `src/utils/autoClean.ts`: Auto Clean (pure): orphan outline pixels, pinholes, specks, body-height size check, palette roles. `autoCleanCanvas.ts` runs it on frame images.
+- `src/utils/strip.ts`: rebuilds an animation's sheet strip from its frames, and builds manifest entries.
 - `public/assets/`: reference images for the built-in profiles.
 
 ## Rules
 
-- The cleanup pipeline must stay deterministic: the same input image and settings must always produce the same output. Do not use randomness, model calls, or time-dependent logic in `pipeline.ts`, `canvasPipeline.ts`, or `gridLayout.ts`.
+- The cleanup pipeline must stay deterministic: the same input image and settings must always produce the same output. Do not use randomness, model calls, or time-dependent logic in `pipeline.ts`, `canvasPipeline.ts`, `gridLayout.ts`, or `autoClean.ts`.
+- When an animation's frames change, rebuild `cleanedImage` from the frames (use `applyFrameEdit` in App.tsx or `buildStripDataUrl`). The manifest frame count comes from `item.frames.length`.
 - Never put API keys in code or commits. The key comes only from `GEMINI_API_KEY` in `.env`, which git ignores.
 - Library items and profiles are stored in IndexedDB only. localStorage is just for small settings like the selected model id. Do not store image data URLs in localStorage.
 - Built-in profile defaults apply only when no saved profile with that id exists. Never overwrite a user's saved profile on load.
